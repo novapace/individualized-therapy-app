@@ -1,0 +1,1340 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>novapace IT</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#ffffff">
+<link rel="icon" href="icon-192.png" type="image/png">
+<style>
+  /* Palette from the patient app (sole_hardware_clip_P4 tools/client_app.html):
+     white page, teal/green logo colours, neutrals derived from the teal.
+     --sideL / --sideR are the two foot series in the 3D view and the step
+     list. Checked with the dataviz validator against white: lightness band,
+     chroma, colour-blind separation (worst protan dE 21.9) and 3:1 contrast
+     all pass. They are only used inside the 3D view and its legend and
+     readout — text stays in --fg/--dim, and every coloured mark carries an
+     "L"/"R" label next to it. */
+  :root {
+    --brand: #458d7f; --brand-lt: #8ec68b;
+    --bg: #ffffff; --panel: #f4f8f7;
+    --grid: #d5e1de; --track: #b5c8c3;
+    --fg: #10201d; --dim: #5a716c;
+    --h: #7a4d00; --stop: #c62828;
+    --accent: #2f6f63; --muted: #e6eeeb;
+    --start: rgb(142, 198, 139);
+    --sideL: #1f6fb2; --sideR: #d0611c;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+               font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+               -webkit-tap-highlight-color: transparent; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px;
+           padding: 10px 14px; background: var(--bg); border-bottom: 2px solid;
+           border-image: linear-gradient(90deg, var(--brand), var(--brand-lt)) 1; }
+  header #logo { height: 26px; width: auto; max-width: 50%; flex: 1;
+                 object-fit: contain; object-position: left center; }
+  header h1 { font-size: 20px; margin: 0; font-weight: 600; flex: 1; color: var(--accent); }
+  #status { font-size: 15px; color: var(--dim); text-align: right; min-width: 0; }
+  #connectBtn { white-space: nowrap; flex: none; }
+  /* Phone width: the logo and the button keep their size, the status line
+     shrinks — "verbunden: L + R" fits on one line at 14 px. */
+  @media (max-width: 480px) {
+    header { gap: 8px; padding: 8px 10px; }
+    header #logo { height: 22px; }
+    #status { font-size: 14px; }
+    #connectBtn { padding: 10px 12px; font-size: 16px; }
+  }
+  #status.ok { color: var(--accent); }
+  #status.bad { color: var(--stop); }
+  button { background: var(--accent); color: white; border: none; padding: 12px 16px;
+           border-radius: 8px; font-size: 17px; font-weight: 600; cursor: pointer;
+           font-family: inherit; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.secondary { background: var(--muted); color: var(--fg); }
+  button.stop { background: var(--stop); color: #fff; }
+  button.start { background: var(--start); color: #12240f; }
+  main { padding: 10px; display: flex; flex-direction: column; gap: 12px;
+         max-width: 820px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--grid); border-radius: 10px;
+          padding: 14px 12px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .pagetitle { margin: 4px 2px 0; font-size: 24px; font-weight: 700; color: var(--fg); }
+  .card > h2 { margin: 0; font-size: 15px; font-weight: 700; color: var(--dim);
+               text-transform: uppercase; letter-spacing: 0.6px; }
+  .hint { font-size: 15px; color: var(--dim); line-height: 1.45; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .row > button { flex: 1 1 auto; }
+
+  /* ---- Clip chips (as in the patient app) ---- */
+  .clips { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .chip { display: flex; align-items: center; gap: 6px; background: #fff; border: 1px solid var(--grid);
+          border-radius: 999px; padding: 6px 8px 6px 12px; font-size: 16px; font-weight: 600; }
+  /* "Connected" dot. Neutral on purpose: the foot colours (--sideL/R) only
+     mean something inside the 3D view; outside it a coloured dot reads as a
+     status signal. */
+  .chip .dot { width: 10px; height: 10px; border-radius: 50%; }
+  /* Two greys, so the chips still tell the feet apart at a glance. */
+  .chip .dot.L { background: #5c5c5c; }
+  .chip .dot.R { background: #b4b4b4; }
+  .chip .batt .shell { fill: none; stroke: var(--dim); stroke-width: 1.2; }
+  .chip .batt .cap   { fill: var(--dim); }
+  .chip .batt .cell  { fill: none; }
+  .chip .batt .cell.on { fill: var(--accent); }
+  .chip .batt.low .shell { stroke: var(--stop); }
+  .chip .batt.low .cell.on, .chip .batt.low .cap { fill: var(--stop); }
+  .chip button { padding: 4px 11px; font-size: 15px; border-radius: 999px;
+                 background: var(--muted); color: var(--fg); }
+  .lock { font-size: 15px; font-weight: 600; color: var(--h); background: #fff7e6;
+          border: 1px solid #f0d9a3; border-radius: 6px; padding: 6px 10px; }
+
+  /* ---- Live tiles ---- */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+  .tile { background: #fff; border: 1px solid var(--grid); border-radius: 8px; padding: 8px 10px; }
+  .tile .lbl { font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.4px;
+               display: flex; align-items: center; gap: 6px; }
+  .tile .val { font-size: 22px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .tile .sub { font-size: 14px; color: var(--dim); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; display: inline-block; }
+
+  /* ---- 3D view ---- */
+  .viewer { position: relative; background: #fff; border: 1px solid var(--grid); border-radius: 8px;
+            overflow: hidden; touch-action: none; }
+  .viewer canvas { display: block; width: 100%; height: min(62vh, 460px); cursor: grab; }
+  .viewer canvas:active { cursor: grabbing; }
+  .viewer .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+                   text-align: center; padding: 20px; color: var(--dim); font-size: 16px; pointer-events: none; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 14px; color: var(--dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .player { display: flex; align-items: center; gap: 10px; }
+  .player input[type=range] { flex: 1; min-width: 0; }
+  .player .time { font-size: 15px; font-variant-numeric: tabular-nums; color: var(--dim); white-space: nowrap; }
+  .player button { padding: 10px 14px; min-width: 52px; }
+  .opts { display: flex; gap: 10px 16px; flex-wrap: wrap; align-items: center; font-size: 15px; }
+  .opts label { display: inline-flex; align-items: center; gap: 6px; }
+  select { font: inherit; font-size: 15px; padding: 6px 8px; border-radius: 6px;
+           border: 1px solid var(--track); background: #fff; color: var(--fg); }
+  .hud { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 6px;
+         font-size: 15px; font-variant-numeric: tabular-nums; }
+  .hud div { display: flex; align-items: center; gap: 8px; }
+  .filebtn { position: relative; overflow: hidden; display: inline-flex; }
+  .filebtn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+  /* ---- Thresholds ---- */
+  .thr { background: #fff; border: 1px solid var(--grid); border-radius: 8px; padding: 10px 12px;
+         display: flex; flex-direction: column; gap: 8px; }
+  .thr .top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .thr .name { font-size: 17px; font-weight: 600; }
+  .thr .name b { font-variant-numeric: tabular-nums; }
+  .slider { display: flex; align-items: center; gap: 10px; }
+  .slider input[type=range] { flex: 1; min-width: 0; }
+  input[type=range] { accent-color: var(--brand); height: 34px; }
+  .nudge { flex: none; width: 48px; height: 48px; padding: 0; border-radius: 10px;
+           background: var(--muted); color: var(--fg); font-size: 26px; line-height: 1; }
+  .stat { font-size: 14px; color: var(--dim); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .stat button { padding: 6px 10px; font-size: 14px; background: var(--muted); color: var(--fg); }
+  .switchrow { display: flex; align-items: center; gap: 10px; }
+  .switchrow .state { font-size: 16px; font-weight: 700; color: var(--dim); min-width: 2.2em; }
+  .switchrow .state.on { color: var(--accent); }
+  .sw { flex: none; width: 60px; height: 34px; border-radius: 999px; padding: 0;
+        background: var(--track); position: relative; transition: background 0.15s ease; }
+  .sw .knob { position: absolute; top: 4px; left: 4px; width: 26px; height: 26px; border-radius: 50%;
+              background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.3); transition: transform 0.15s ease; }
+  .sw[aria-checked="true"] { background: var(--accent); }
+  .sw[aria-checked="true"] .knob { transform: translateX(26px); }
+  @media (prefers-reduced-motion: reduce) { .sw, .sw .knob { transition: none; } }
+  .feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px;
+          font-size: 15px; font-variant-numeric: tabular-nums; }
+  .feed li { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; background: #fff;
+             border: 1px solid var(--grid); border-radius: 6px; flex-wrap: wrap; }
+  .feed .what { margin-left: auto; font-weight: 600; }
+  .feed .what.vib { color: var(--stop); }
+  .feed .what.skip { color: var(--dim); font-weight: 400; }
+  .feed .swatch { align-self: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <img id="logo" src="novapace_logo_horizontal_green_F1uoio.png" alt="novapace">
+  <h1 id="wordmark" hidden>novapace</h1>
+  <span id="status">getrennt</span>
+  <button id="connectBtn">Clip verbinden</button>
+</header>
+
+<main>
+
+  <h1 class="pagetitle">Individuelle Therapie</h1>
+
+  <!-- ================================================================ -->
+  <section class="card" id="recCard">
+    <h2>Daten aufnehmen</h2>
+    <div class="clips" id="clips"><span class="hint">Kein Clip verbunden.</span></div>
+    <div class="lock" id="lockBanner" hidden></div>
+    <div class="row"><button id="recBtn" class="start">Aufnahme starten</button></div>
+    <div class="hint" id="recInfo">
+      Aufgezeichnet werden je Fuß die Koordinaten x, y, z, der Flexwinkel und die
+      aktuelle Schrittlänge über der Zeit. Beim Beenden wird je Seite eine CSV-Datei
+      gespeichert und die Aufnahme unten angezeigt.
+    </div>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section class="card" id="viewCard">
+    <h2>Aufgenommene Daten ansehen</h2>
+    <div class="row">
+      <span class="hint" id="srcInfo" style="flex:1 1 200px">Noch keine Daten.</span>
+      <span class="filebtn"><button class="secondary" tabindex="-1">CSV laden</button>
+        <input type="file" id="csvInput" accept=".csv,text/csv" multiple aria-label="CSV-Dateien laden"></span>
+      <button class="secondary" id="refreshBtn" hidden>Aktualisieren</button>
+    </div>
+    <div class="viewer">
+      <canvas id="view3d" aria-label="Fußtrajektorien in 3D"></canvas>
+      <div class="empty" id="viewEmpty">Eine Aufnahme machen oder CSV-Dateien laden.</div>
+    </div>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--sideL)"></i>Links (L)</span>
+      <span><i class="swatch" style="background:var(--sideR)"></i>Rechts (R)</span>
+      <span>Raster 1 m · Ziehen dreht, Mausrad/zwei Finger zoomen</span>
+    </div>
+    <div class="player">
+      <button id="playBtn" aria-label="Abspielen">▶</button>
+      <input type="range" id="timeSlider" min="0" max="1000" step="1" value="0" aria-label="Zeit">
+      <span class="time" id="timeLbl">0,0 / 0,0 s</span>
+    </div>
+    <div class="opts">
+      <label>Tempo <select id="speedSel">
+        <option value="0.25">0,25×</option><option value="0.5">0,5×</option>
+        <option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option>
+      </select></label>
+      <label>Höhe <select id="zSel">
+        <option value="1" selected>1×</option><option value="2">2×</option><option value="5">5×</option>
+      </select></label>
+      <label><input type="checkbox" id="alignChk" checked> Gehrichtung ausrichten</label>
+      <button class="secondary" id="resetViewBtn">Ansicht zurücksetzen</button>
+      <button class="secondary" id="videoBtn">Als Video speichern</button>
+    </div>
+    <div class="hud" id="hud"></div>
+  </section>
+
+  <!-- ================================================================ -->
+  <section class="card" id="fbCard">
+    <h2>Feedback anpassen</h2>
+    <div class="hint">
+      Ein Schritt, der unter einer eingeschalteten Schwelle bleibt, löst am Clip
+      dieses Fußes eine Vibration aus. Ausgenommen sind Treppenschritte (und die drei
+      danach) sowie Kurvenschritte selbst — dieselbe Erkennung wie im
+      Patienten-Clip. Die Schwellen werden im Clip gespeichert und gelten auch ohne Telefon.
+    </div>
+    <div id="thresholds"></div>
+    <div class="hint" id="fbSummary"></div>
+    <div class="thr">
+      <div class="top"><span class="name">Vibrationsstärke <b id="intVal">7</b></span>
+        <button class="secondary" id="pulseBtn">Testimpuls</button></div>
+      <div class="slider">
+        <button class="nudge" data-for="intensity" data-dir="-1" aria-label="Schwächer">−</button>
+        <input type="range" id="intensity" min="1" max="10" step="1" value="7" aria-label="Vibrationsstärke">
+        <button class="nudge" data-for="intensity" data-dir="1" aria-label="Stärker">+</button>
+      </div>
+    </div>
+    <div>
+      <div class="hint" style="margin-bottom:6px">Letzte Schritte</div>
+      <ul class="feed" id="feed"><li><span class="hint">Noch keine Schritte.</span></li></ul>
+    </div>
+  </section>
+
+</main>
+
+<script>
+'use strict';
+// =====================================================================
+//  Protocol — mirrors src/comms/ble.h of this repository. Not the patient
+//  app's protocol: different service, different frames.
+// =====================================================================
+const SERVICE_UUID = '4e7a5c00-0000-4e8a-a8d7-000000000101';
+const STEP_UUID    = '4e7a5c00-0000-4e8a-a8d7-000000000102';
+const STATUS_UUID  = '4e7a5c00-0000-4e8a-a8d7-000000000103';
+const CONTROL_UUID = '4e7a5c00-0000-4e8a-a8d7-000000000104';
+// Link gate — must match NOVAPACE_UNLOCK_TOKEN in src/config.h. Not a secret
+// (it ships in this file); it keeps a scanner from driving the clip.
+const UNLOCK_TOKEN = 'Np4x7Qr2';
+
+const SAMPLE_MS = 10;        // SAMPLE_RATE_HZ = 100
+const TRAJ_DECIMATION = 4;   // config.h
+// How long a step waits for missing 'P' frames before it is assembled with
+// what arrived. The clip sends a whole trajectory within ~100–200 ms.
+const TRAJ_WAIT_MS = 800;
+// STEPLEN_ARTIFACT_MAX_M, config.h: shorter is a segmentation glitch.
+const ARTIFACT_MAX_M = 0.05;
+
+// FeedbackFlag, src/gait/threshold_feedback.h
+const F = { CURVE: 0x01, STAIRS: 0x02, LOCKOUT: 0x04, EXCLUDED: 0x08, VIBRATE: 0x10,
+            BELOW_LEN: 0x20, BELOW_FLEX: 0x40, BELOW_RANGE: 0x80 };
+
+// Threshold definitions. `key` is the letter in "T<key>ennn" and in the
+// control read value; values travel as whole cm / whole degrees.
+const THRESHOLDS = [
+  { key: 'L', name: 'Mindest-Schrittlänge', min: 20, max: 200, def: 80, bit: F.BELOW_LEN,
+    fmt: v => num(v / 100, 2) + ' m', stepVal: s => s.len * 100, unitNote: 'Schrittlänge' },
+  { key: 'F', name: 'Mindest-Flexwinkel (Maximum)', min: 0, max: 90, def: 10, bit: F.BELOW_FLEX,
+    fmt: v => v + '°', stepVal: s => s.maxflex, unitNote: 'max. Flexwinkel' },
+  { key: 'R', name: 'Mindest-Flex-Umfang', min: 0, max: 100, def: 25, bit: F.BELOW_RANGE,
+    fmt: v => v + '°', stepVal: s => s.range, unitNote: 'Flex-Umfang' },
+];
+
+const state = {
+  clips: [],
+  intensity: 7,
+  fb: { L: { on: 0, v: 80 }, F: { on: 0, v: 10 }, R: { on: 0, v: 25 } },
+  feed: [],              // newest first, both sides
+};
+
+const $ = id => document.getElementById(id);
+const num = (v, d) => v.toFixed(d).replace('.', ',').replace('-', '−');
+const pad = (n, w) => String(n).padStart(w, '0');
+const sideName = s => s === 'L' ? 'Links' : 'Rechts';
+const sideColor = s => getComputedStyle(document.documentElement)
+  .getPropertyValue(s === 'L' ? '--sideL' : '--sideR').trim();
+const clipBySide = s => state.clips.find(c => c.side === s);
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+const setStatus = (msg, cls) => { const e = $('status'); e.textContent = msg; e.className = cls || ''; };
+const renderConnStatus = () => state.clips.length
+  ? setStatus('verbunden: ' + state.clips.map(c => c.side).sort().join(' + '), 'ok')
+  : setStatus('getrennt');
+
+// =====================================================================
+//  BLE
+// =====================================================================
+async function sendCmd(clip, cmd, ack) {
+  if (!clip?.ctrl) return;
+  const data = new TextEncoder().encode(cmd);
+  try {
+    if (!ack && clip.ctrl.properties.writeWithoutResponse) await clip.ctrl.writeValueWithoutResponse(data);
+    else await clip.ctrl.writeValue(data);
+  } catch (e) { console.warn('[ble write]', clip.side, cmd, e.message); }
+}
+const broadcast = cmd => Promise.all(state.clips.map(c => sendCmd(c, cmd)));
+
+function bleErrorText(e) {
+  switch (e.name) {
+    case 'NotFoundError':
+      return ['Kein Clip ausgewählt. Stand keiner in der Liste: Clip einschalten, rund 20 s '
+              + 'warten und noch einmal auf „Clip verbinden“ tippen. Clips mit der '
+              + 'Patienten-Firmware erscheinen hier nicht.', ''];
+    case 'NotAllowedError': return ['Bluetooth ist für diese Seite gesperrt — in den Browser-Einstellungen freigeben.', 'bad'];
+    case 'SecurityError':   return ['Bluetooth braucht eine sichere Seite (https://).', 'bad'];
+    default:                return ['Fehler: ' + e.message, 'bad'];
+  }
+}
+
+async function connect() {
+  if (!navigator.bluetooth) { setStatus('Web Bluetooth nicht verfügbar (Chrome benutzen)', 'bad'); return; }
+  try {
+    setStatus('suche Clip…');
+    // Filtered on the SERVICE, not the name prefix: the patient firmware also
+    // advertises "novapace-…", and only this firmware carries this service.
+    const device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE_UUID] }] });
+    if (state.clips.some(c => c.device.id === device.id)) { setStatus('Clip ist bereits verbunden', 'bad'); return; }
+    setStatus(`verbinde mit ${device.name}…`);
+    const server  = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    const clip = {
+      device,
+      side: device.name?.endsWith('-L') ? 'L' : 'R',
+      stepChar: await service.getCharacteristic(STEP_UUID),
+      statusChar: await service.getCharacteristic(STATUS_UUID),
+      ctrl: await service.getCharacteristic(CONTROL_UUID),
+      offset: null,        // phone ms - clip ms, leaky minimum (see onStatus)
+      pos: [0, 0, 0],      // cumulative foot position, clip earth frame, m
+      pend: new Map(),     // seq -> { s, pts, got, timer }
+      live: [],            // recent { tc, flex } from status frames, for gap filling
+      liveFlex: null, lastStep: null, stepNo: 0, lastSwingEnd: -Infinity,
+      batt: null, lockout: false,
+    };
+    // Unlock first: until then the clip ignores commands and sends nothing,
+    // and it drops the link after 10 s.
+    await sendCmd(clip, 'U' + UNLOCK_TOKEN, true);
+    await clip.stepChar.startNotifications();
+    clip.stepChar.addEventListener('characteristicvaluechanged', ev => onStepFrame(clip, ev.target.value));
+    await clip.statusChar.startNotifications();
+    clip.statusChar.addEventListener('characteristicvaluechanged', ev => onStatus(clip, ev.target.value));
+    device.addEventListener('gattserverdisconnected', () => onDisconnected(clip));
+    state.clips.push(clip);
+    await hydrate(clip);
+    renderAll();
+  } catch (e) {
+    const [msg, cls] = bleErrorText(e);
+    if (!cls && state.clips.length) { renderConnStatus(); return; }
+    setStatus(msg, cls);
+  }
+}
+
+// "SRV07L1080F1010R0025", src/comms/ble.h
+function parseCtl(s) {
+  if (s.length < 20 || s[0] !== 'S') return null;
+  const n = (a, b) => parseInt(s.substring(a, b), 10);
+  const st = { side: s[1], intensity: n(3, 5),
+    L: { on: n(6, 7), v: n(7, 10) }, F: { on: n(11, 12), v: n(12, 15) }, R: { on: n(16, 17), v: n(17, 20) } };
+  const vals = [st.intensity, st.L.on, st.L.v, st.F.on, st.F.v, st.R.on, st.R.v];
+  return vals.some(Number.isNaN) ? null : st;
+}
+
+// The first clip to connect brings the therapist's stored values; every
+// later one is pushed to match, so both feet cue against the same thresholds.
+async function hydrate(clip) {
+  let st = null;
+  try { st = parseCtl(new TextDecoder().decode(await clip.ctrl.readValue())); }
+  catch (e) { console.warn('[ble read]', e.message); }
+  if (st && state.clips.length === 1) {
+    state.intensity = st.intensity;
+    for (const k of ['L', 'F', 'R']) state.fb[k] = { on: st[k].on ? 1 : 0, v: st[k].v };
+    renderThresholds();
+  } else {
+    await pushSettings(clip);
+  }
+}
+
+const thrCmd = k => 'T' + k + state.fb[k].on + pad(state.fb[k].v, 3);
+async function pushSettings(clip) {
+  await sendCmd(clip, 'V' + pad(state.intensity, 2));
+  for (const k of ['L', 'F', 'R']) await sendCmd(clip, thrCmd(k));
+}
+
+function onDisconnected(clip) {
+  for (const e of clip.pend.values()) clearTimeout(e.timer);
+  state.clips = state.clips.filter(c => c !== clip);
+  renderAll();
+}
+
+// ---- Status frame 'H' ------------------------------------------------
+function onStatus(clip, dv) {
+  if (dv.byteLength < 10 || dv.getUint8(0) !== 0x48) return;
+  const tc   = dv.getUint32(1, true);
+  const flex = dv.getInt16(5, true) / 10;
+  const batt = dv.getUint8(7);
+  const lockout = (dv.getUint8(8) & 1) !== 0;
+
+  // Clock mapping clip -> phone. The frame leaves the clip at most one
+  // heartbeat after its sample and then spends a variable time in transit,
+  // so the SMALLEST (arrival - sample) seen is the closest to the true
+  // offset; the slow upward leak lets it follow a clip clock that runs
+  // slightly slow against the phone's.
+  const sample = Date.now() - tc;
+  clip.offset = clip.offset == null ? sample : Math.min(sample, clip.offset + 0.05);
+
+  clip.liveFlex = flex;
+  clip.live.push({ tc, flex });
+  if (clip.live.length > 120) clip.live.splice(0, clip.live.length - 120);
+
+  const battNew = batt === 0xFF ? null : batt;
+  if (battNew !== clip.batt || lockout !== clip.lockout) {
+    clip.batt = battNew; clip.lockout = lockout; renderClips();
+  }
+  if (rec.on) recStance(clip, tc + clip.offset, flex);
+  renderTilesThrottled();
+}
+
+// ---- Step frames 'S' and 'P' ----------------------------------------
+function onStepFrame(clip, dv) {
+  if (dv.byteLength < 4) return;
+  const tag = dv.getUint8(0);
+  if (tag === 0x53 && dv.byteLength >= 20) {            // 'S'
+    const s = {
+      seq: dv.getUint8(1), start: dv.getUint32(2, true), n: dv.getUint8(6), npts: dv.getUint8(7),
+      dx: dv.getInt16(8, true) / 1000, dy: dv.getInt16(10, true) / 1000, dz: dv.getInt16(12, true) / 1000,
+      maxflex: dv.getInt16(14, true) / 10, range: dv.getInt16(16, true) / 10,
+      turn: dv.getInt8(18), flags: dv.getUint8(19),
+    };
+    // A newer summary closes any older step still waiting for its points.
+    for (const [seq, e] of clip.pend) if (seq !== s.seq && e.s) completeStep(clip, seq);
+    const e = pendEntry(clip, s.seq);
+    e.s = s;
+    if (s.npts === 0 || e.got >= s.npts) completeStep(clip, s.seq);
+    else e.timer = setTimeout(() => completeStep(clip, s.seq), TRAJ_WAIT_MS);
+  } else if (tag === 0x50) {                            // 'P'
+    const seq = dv.getUint8(1), first = dv.getUint8(2), count = dv.getUint8(3);
+    const e = pendEntry(clip, seq);
+    for (let k = 0; k < count && 4 + 8 * k + 8 <= dv.byteLength; k++) {
+      const o = 4 + 8 * k;
+      if (!e.pts[first + k]) e.got++;
+      e.pts[first + k] = { x: dv.getInt16(o, true) / 1000, y: dv.getInt16(o + 2, true) / 1000,
+                           z: dv.getInt16(o + 4, true) / 1000, flex: dv.getInt16(o + 6, true) / 10 };
+    }
+    if (e.s && e.got >= e.s.npts) completeStep(clip, seq);
+  }
+}
+
+function pendEntry(clip, seq) {
+  let e = clip.pend.get(seq);
+  if (!e) {
+    e = { s: null, pts: [], got: 0, timer: null };
+    clip.pend.set(seq, e);
+    // Points whose summary never came (should not happen) must not pile up.
+    if (clip.pend.size > 6) clip.pend.delete(clip.pend.keys().next().value);
+  }
+  return e;
+}
+
+// Nearest live flex sample to a clip timestamp — fills the angle of
+// trajectory points that never arrived.
+function liveFlexAt(clip, tc) {
+  let best = null, bd = Infinity;
+  for (const l of clip.live) { const d = Math.abs(l.tc - tc); if (d < bd) { bd = d; best = l.flex; } }
+  return best;
+}
+
+function completeStep(clip, seq) {
+  const e = clip.pend.get(seq);
+  if (!e || !e.s) return;
+  clearTimeout(e.timer);
+  clip.pend.delete(seq);
+  const s = e.s;
+  if (clip.offset == null) clip.offset = Date.now() - (s.start + SAMPLE_MS * s.n) - 150;
+
+  // Buffer index of every point: k*D, the last one on n-1 (ble.h).
+  const n = Math.max(2, s.n);
+  const count = s.npts > 0 ? s.npts : Math.floor((n - 2) / TRAJ_DECIMATION) + 2;
+  const idx = k => (k < count - 1 ? k * TRAJ_DECIMATION : n - 1);
+  const pts = [];
+  for (let k = 0; k < count; k++) pts.push(Object.assign({ i: idx(k) }, e.pts[k] || null));
+  // Known anchors: start at the origin, end on the summary's displacement.
+  if (pts[0].x == null) Object.assign(pts[0], { x: 0, y: 0, z: 0 });
+  const last = pts[count - 1];
+  if (last.x == null) Object.assign(last, { x: s.dx, y: s.dy, z: s.dz });
+  // Missing points: positions linear between their known neighbours.
+  for (let k = 1; k < count - 1; k++) {
+    if (pts[k].x != null) continue;
+    let a = k - 1; while (pts[a].x == null) a--;
+    let b = k + 1; while (pts[b].x == null) b++;
+    const f = (pts[k].i - pts[a].i) / (pts[b].i - pts[a].i);
+    for (const ax of ['x', 'y', 'z']) pts[k][ax] = pts[a][ax] + f * (pts[b][ax] - pts[a][ax]);
+  }
+  for (const p of pts) if (p.flex == null) p.flex = liveFlexAt(clip, s.start + SAMPLE_MS * p.i);
+
+  const base = clip.pos.slice();
+  clip.pos = [base[0] + s.dx, base[1] + s.dy, base[2] + s.dz];
+  const len = Math.hypot(s.dx, s.dy);
+  // Under STEPLEN_ARTIFACT_MAX_M (5 cm) the clip itself does not count it as
+  // a step (threshold_feedback.cpp). Its movement still goes into the
+  // positions, but it gets no step number, no statistics, no line in the
+  // step list or the tiles: its rows carry the previous real step's values.
+  const artifact = len < ARTIFACT_MAX_M;
+  if (!artifact) clip.stepNo++;
+  const step = {
+    no: clip.stepNo, side: clip.side,
+    t0: s.start + clip.offset, t1: s.start + SAMPLE_MS * (n - 1) + clip.offset,
+    len, h: s.dz, maxflex: s.maxflex, range: s.range,
+    turn: s.turn, flags: s.flags, partial: s.npts === 0 || e.got < s.npts,
+  };
+  clip.lastSwingEnd = step.t1;
+  if (!artifact) clip.lastStep = step;
+
+  if (rec.on) recSwing(clip, step, clip.lastStep, !artifact, pts.map(p => ({
+    t: s.start + SAMPLE_MS * p.i + clip.offset, x: base[0] + p.x, y: base[1] + p.y, z: base[2] + p.z, flex: p.flex,
+  })));
+  if (artifact) return;
+
+  state.feed.unshift(step);
+  if (state.feed.length > 8) state.feed.length = 8;
+  renderFeed();
+  renderTiles();
+}
+
+// =====================================================================
+//  Recording
+// =====================================================================
+// One row per point in time and foot. During a swing the rows are the
+// step's trajectory points (25 Hz); while the foot stands they come from the
+// status frames (~16 Hz), position held, angle live. The swing of a step is
+// only known once the step has closed, so the stance rows that arrived in
+// the meantime are taken back out and replaced (recSwing).
+const rec = { on: false, started: null, rows: { L: [], R: [] }, steps: { L: [], R: [] } };
+let recLastMsg = '';
+
+function recStance(clip, t, flex) {
+  const rows = rec.rows[clip.side];
+  if (rows.length && t <= rows[rows.length - 1].t) return;
+  rows.push({ t, phase: 'stance', x: clip.pos[0], y: clip.pos[1], z: clip.pos[2], flex, st: clip.lastStep });
+}
+
+// `step` places the swing in time; `st` is the step whose values the rows
+// carry (the previous real one when `step` is an artifact); `counted` says
+// whether it enters the step statistics.
+function recSwing(clip, step, st, counted, pts) {
+  const rows = rec.rows[clip.side];
+  // Rows from the step's start on were recorded with the old, held position.
+  const after = [];
+  while (rows.length && rows[rows.length - 1].t >= step.t0) {
+    const r = rows.pop();
+    if (r.t > step.t1) after.unshift(r);
+  }
+  for (const p of pts) rows.push({ t: p.t, phase: 'swing', x: p.x, y: p.y, z: p.z, flex: p.flex, st });
+  for (const r of after) {
+    rows.push(Object.assign(r, { x: clip.pos[0], y: clip.pos[1], z: clip.pos[2], st }));
+  }
+  if (counted) rec.steps[clip.side].push(step);
+  renderRec();
+}
+
+const REC_COLUMNS = ['timestamp', 't_ms', 'side', 'phase', 'step', 'x_m', 'y_m', 'z_m', 'flex_deg',
+  'step_length_m', 'step_height_m', 'step_max_flex_deg', 'step_flex_range_deg', 'step_turn_deg',
+  'curve', 'stairs', 'excluded', 'vibration'];
+
+const stamp = ms => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1, 2)}-${pad(d.getDate(), 2)} `
+       + `${pad(d.getHours(), 2)}:${pad(d.getMinutes(), 2)}:${pad(d.getSeconds(), 2)}.${pad(d.getMilliseconds(), 3)}`;
+};
+const fileBase = d => `${d.getFullYear()}-${pad(d.getMonth() + 1, 2)}-${pad(d.getDate(), 2)}_`
+                    + `${pad(d.getHours(), 2)}-${pad(d.getMinutes(), 2)}-${pad(d.getSeconds(), 2)}`;
+
+function recCsv(side) {
+  const t0 = rec.started.getTime();
+  const lines = [REC_COLUMNS.join(',')];
+  for (const r of rec.rows[side]) {
+    const s = r.st;
+    lines.push([
+      stamp(r.t), Math.round(r.t - t0), side, r.phase, s ? s.no : '',
+      r.x.toFixed(3), r.y.toFixed(3), r.z.toFixed(3), r.flex == null ? '' : r.flex.toFixed(1),
+      s ? s.len.toFixed(3) : '', s ? s.h.toFixed(3) : '', s ? s.maxflex.toFixed(1) : '',
+      s ? s.range.toFixed(1) : '', s ? s.turn : '',
+      s ? +!!(s.flags & F.CURVE) : '', s ? +!!(s.flags & F.STAIRS) : '',
+      s ? +!!(s.flags & F.EXCLUDED) : '', s ? +!!(s.flags & F.VIBRATE) : '',
+    ].join(','));
+  }
+  return lines.join('\n') + '\n';
+}
+
+function download(name, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function recStart() {
+  rec.on = true;
+  rec.started = new Date();
+  rec.rows = { L: [], R: [] };
+  rec.steps = { L: [], R: [] };
+  // Coordinates and step numbers count from the start of the recording.
+  for (const c of state.clips) { c.pos = [0, 0, 0]; c.stepNo = 0; c.lastStep = null; }
+  recLastMsg = '';
+  acquireWakeLock();
+  renderRec();
+}
+
+function recStop() {
+  rec.on = false;
+  releaseWakeLock();
+  // Steps still waiting for their points belong in the file.
+  for (const c of state.clips) for (const seq of [...c.pend.keys()]) completeStep(c, seq);
+  const sides = ['L', 'R'].filter(s => rec.rows[s].length);
+  const base = fileBase(rec.started);
+  // Staggered: two downloads in the same tick, and Chrome drops the second.
+  sides.forEach((s, i) => setTimeout(() =>
+    download(`${base}_${s}.csv`, new Blob([recCsv(s)], { type: 'text/csv;charset=utf-8' })), i * 500));
+  recLastMsg = sides.length
+    ? 'Gespeichert: ' + sides.map(s => `${base}_${s}.csv`).join('  ·  ')
+    : 'Aufnahme beendet — es kamen keine Daten an, also wurde nichts gespeichert.';
+  if (sides.length) loadDataset(datasetFromRecording());
+  renderRec();
+}
+
+function renderRec() {
+  const b = $('recBtn');
+  b.textContent = rec.on ? 'Aufnahme beenden' : 'Aufnahme starten';
+  b.className = rec.on ? 'stop' : 'start';
+  b.disabled = !rec.on && !state.clips.length;
+  $('refreshBtn').hidden = !rec.on;
+  if (rec.on) {
+    const secs = Math.round((Date.now() - rec.started.getTime()) / 1000);
+    $('recInfo').textContent = `Aufnahme läuft · ${Math.floor(secs / 60)}:${pad(secs % 60, 2)} min · `
+      + ['L', 'R'].map(s => `${s} ${rec.steps[s].length} Schritte`).join(' / ');
+  } else if (recLastMsg) {
+    $('recInfo').textContent = recLastMsg;
+  }
+}
+setInterval(() => { if (rec.on) renderRec(); }, 1000);
+
+// Screen wake lock while recording: a locked screen freezes the page and
+// the notifications stop arriving.
+let wakeLock = null;
+async function acquireWakeLock() {
+  if (!navigator.wakeLock || wakeLock) return;
+  try { wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; }); }
+  catch (e) { console.warn('[wakelock]', e.message); }
+}
+function releaseWakeLock() { if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; } }
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && rec.on) acquireWakeLock();
+});
+
+// =====================================================================
+//  Datasets for the viewer and the threshold statistics
+// =====================================================================
+// { name, sides: { L: { rows: [{t,x,y,z,flex,step}], steps: [...] }, R: … } }
+// t in ms on a common clock (phone time, or t_ms from the CSV).
+let dataset = null;
+
+function datasetFromRecording() {
+  const sides = {};
+  for (const s of ['L', 'R']) {
+    if (!rec.rows[s].length) continue;
+    sides[s] = {
+      rows: rec.rows[s].map(r => ({ t: r.t, x: r.x, y: r.y, z: r.z, flex: r.flex, step: r.st })),
+      steps: rec.steps[s].slice(),
+    };
+  }
+  return { name: 'Aufnahme vom ' + stamp(rec.started.getTime()).slice(0, 19), sides, t0: rec.started.getTime() };
+}
+
+function parseCsv(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) throw new Error('leer');
+  const head = lines[0].split(',');
+  const col = name => head.indexOf(name);
+  const need = ['t_ms', 'side', 'x_m', 'y_m', 'z_m', 'flex_deg'];
+  for (const n of need) if (col(n) < 0) throw new Error(`Spalte „${n}“ fehlt`);
+  const c = Object.fromEntries(REC_COLUMNS.map(n => [n, col(n)]));
+  const out = {};
+  const stepsBySide = {};
+  for (let i = 1; i < lines.length; i++) {
+    const v = lines[i].split(',');
+    const side = v[c.side] === 'L' ? 'L' : 'R';
+    const sd = out[side] || (out[side] = { rows: [], steps: [] });
+    const map = stepsBySide[side] || (stepsBySide[side] = new Map());
+    let step = null;
+    const no = c.step >= 0 && v[c.step] !== '' ? +v[c.step] : null;
+    const tooShort = c.step_length_m >= 0 && +v[c.step_length_m] < ARTIFACT_MAX_M;
+    if (no != null && !tooShort) {
+      step = map.get(no);
+      if (!step) {
+        const flag = (name, bit) => (c[name] >= 0 && v[c[name]] === '1' ? bit : 0);
+        step = { no, side, len: +v[c.step_length_m], h: +v[c.step_height_m], maxflex: +v[c.step_max_flex_deg],
+                 range: +v[c.step_flex_range_deg], turn: +v[c.step_turn_deg] || 0,
+                 flags: flag('curve', F.CURVE) | flag('stairs', F.STAIRS) | flag('excluded', F.EXCLUDED)
+                      | flag('vibration', F.VIBRATE) };
+        map.set(no, step);
+        sd.steps.push(step);
+      }
+    }
+    sd.rows.push({ t: +v[c.t_ms], x: +v[c.x_m], y: +v[c.y_m], z: +v[c.z_m],
+                   flex: v[c.flex_deg] === '' ? null : +v[c.flex_deg], step });
+  }
+  return out;
+}
+
+async function loadCsvFiles(files) {
+  const sides = {};
+  const names = [];
+  for (const f of files) {
+    try {
+      const parsed = parseCsv(await f.text());
+      for (const s of Object.keys(parsed)) sides[s] = parsed[s];
+      names.push(f.name);
+    } catch (e) {
+      $('srcInfo').textContent = `${f.name}: nicht lesbar (${e.message}).`;
+      return;
+    }
+  }
+  if (!Object.keys(sides).length) return;
+  loadDataset({ name: names.join(' + '), sides, t0: 0 });
+}
+
+// =====================================================================
+//  3D view
+// =====================================================================
+// Hand-written perspective projection on a 2D canvas instead of a 3D
+// library: the scene is two polylines, a grid and two markers, and keeping
+// the page one self-contained file is what lets it run offline from the
+// service worker.
+// Foot glyph: length in front of and behind the foot position, in metres.
+const FOOT_TOE_M = 0.20, FOOT_HEEL_M = 0.07;
+const view = {
+  tracks: {},          // side -> { t[], x[], y[], z[], flex[], step[] } (seconds, aligned)
+  tMin: 0, tMax: 0, t: 0,
+  playing: false, lastFrame: 0,
+  az: -2.3, el: 0.55, dist: 6, target: [0, 0, 0], fit: 6,
+  bounds: null,
+  recorder: null,
+};
+const canvas = $('view3d');
+const ctx = canvas.getContext('2d');
+
+function loadDataset(ds) {
+  dataset = ds;
+  const n = s => ds.sides[s] ? `${s} ${ds.sides[s].steps.length} Schritte` : null;
+  $('srcInfo').textContent = `${ds.name} · ` + ['L', 'R'].map(n).filter(Boolean).join(' / ');
+  buildTracks();
+  resetCamera();
+  view.t = view.tMin;
+  setPlaying(false);
+  renderStats();
+  draw();
+}
+
+function buildTracks() {
+  view.tracks = {};
+  if (!dataset) return;
+  const align = $('alignChk').checked;
+  const zs = +$('zSel').value;
+  const allT = Object.values(dataset.sides).filter(s => s.rows.length).map(s => Math.min(...s.rows.map(r => r.t)));
+  const t0 = allT.length ? Math.min(...allT) : 0;
+  let tMax = 0;
+  const box = { x0: Infinity, x1: -Infinity, y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
+  for (const side of ['L', 'R']) {
+    const sd = dataset.sides[side];
+    if (!sd || !sd.rows.length) continue;
+    const rows = sd.rows.slice().sort((a, b) => a.t - b.t);
+    const p0 = rows[0];
+    // Gehrichtung ausrichten: each clip's x/y heading is arbitrary (the
+    // game rotation vector has no north), so the two feet start out rotated
+    // against each other. Rotate each so its first ~2 m of walking points
+    // along +x, and set the feet 20 cm apart.
+    let ang = 0;
+    if (align) {
+      let far = rows[rows.length - 1];
+      for (const r of rows) if (Math.hypot(r.x - p0.x, r.y - p0.y) >= 2) { far = r; break; }
+      ang = Math.atan2(far.y - p0.y, far.x - p0.x);
+    }
+    const ca = Math.cos(-ang), sa = Math.sin(-ang);
+    const lat = align ? (side === 'L' ? 0.1 : -0.1) : 0;
+    const tr = { t: [], x: [], y: [], z: [], flex: [], step: [] };
+    for (const r of rows) {
+      const dx = r.x - p0.x, dy = r.y - p0.y;
+      const x = align ? dx * ca - dy * sa : r.x;
+      const y = (align ? dx * sa + dy * ca : r.y) + lat;
+      const z = (r.z - p0.z) * zs;
+      tr.t.push((r.t - t0) / 1000); tr.x.push(x); tr.y.push(y); tr.z.push(z);
+      tr.flex.push(r.flex); tr.step.push(r.step);
+      if (x < box.x0) box.x0 = x; if (x > box.x1) box.x1 = x;
+      if (y < box.y0) box.y0 = y; if (y > box.y1) box.y1 = y;
+      if (z < box.z0) box.z0 = z; if (z > box.z1) box.z1 = z;
+    }
+    tMax = Math.max(tMax, tr.t[tr.t.length - 1]);
+    view.tracks[side] = tr;
+  }
+  view.tMin = 0;
+  view.tMax = tMax;
+  view.bounds = Object.keys(view.tracks).length ? box : null;
+  view.t = Math.min(view.t, tMax);
+  $('viewEmpty').hidden = !!view.bounds;
+}
+
+function resetCamera() {
+  const b = view.bounds;
+  if (!b) return;
+  view.target = [(b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, b.z0];
+  const span = Math.max(b.x1 - b.x0, b.y1 - b.y0, 1.5);
+  view.fit = span * 1.15 + 1;
+  view.dist = view.fit;
+  view.az = -Math.PI / 2 - 0.6;   // looking along +x from behind-left
+  view.el = 0.6;
+}
+
+function camera() {
+  const ce = Math.cos(view.el), se = Math.sin(view.el);
+  const cam = [view.target[0] + view.dist * ce * Math.cos(view.az),
+               view.target[1] + view.dist * ce * Math.sin(view.az),
+               view.target[2] + view.dist * se];
+  const f = norm(sub(view.target, cam));
+  const r = norm(cross(f, [0, 0, 1]));
+  const u = cross(r, f);
+  const W = canvas.width, H = canvas.height;
+  const focal = (H / 2) / Math.tan((45 * Math.PI / 180) / 2);
+  return p => {
+    const d = [p[0] - cam[0], p[1] - cam[1], p[2] - cam[2]];
+    const zc = dot(d, f);
+    if (zc < 0.05) return null;
+    return [W / 2 + focal * dot(d, r) / zc, H / 2 - focal * dot(d, u) / zc];
+  };
+}
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm = a => { const l = Math.hypot(...a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+
+// Index of the last sample at or before t (binary search).
+function sampleIndex(tr, t) {
+  let lo = 0, hi = tr.t.length - 1;
+  if (t <= tr.t[0]) return 0;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (tr.t[m] <= t) lo = m; else hi = m - 1; }
+  return lo;
+}
+function stateAt(tr, t) {
+  const i = sampleIndex(tr, t);
+  const j = Math.min(i + 1, tr.t.length - 1);
+  const span = tr.t[j] - tr.t[i];
+  const f = span > 0 ? Math.min(1, Math.max(0, (t - tr.t[i]) / span)) : 0;
+  const lerp = (a) => a[i] + f * (a[j] - a[i]);
+  const fl = tr.flex[i] != null && tr.flex[j] != null ? lerp(tr.flex) : tr.flex[i];
+  return { i, p: [lerp(tr.x), lerp(tr.y), lerp(tr.z)], flex: fl, step: tr.step[i], before: t < tr.t[0] };
+}
+// Walking direction around t, horizontal, for the foot glyph.
+function dirAt(tr, t) {
+  const a = stateAt(tr, t - 0.6).p, b = stateAt(tr, t + 0.6).p;
+  const d = [b[0] - a[0], b[1] - a[1]];
+  const l = Math.hypot(d[0], d[1]);
+  return l > 0.05 ? [d[0] / l, d[1] / l] : [1, 0];
+}
+
+function sizeCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  return dpr;
+}
+
+function draw() {
+  const dpr = sizeCanvas();
+  const W = canvas.width, H = canvas.height;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+  renderPlayer();
+  if (!view.bounds) { renderHud(); return; }
+  const P = camera();
+  const b = view.bounds;
+
+  // Ground grid, 1 m, at the lowest point of the data. Recessive.
+  const gx0 = Math.floor(b.x0 - 1), gx1 = Math.ceil(b.x1 + 1);
+  const gy0 = Math.floor(b.y0 - 1), gy1 = Math.ceil(b.y1 + 1);
+  const gz = b.z0;
+  ctx.lineWidth = 1 * dpr;
+  ctx.strokeStyle = '#e3ebe9';
+  const seg = (a, c) => { const pa = P(a), pc = P(c); if (pa && pc) { ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pc[0], pc[1]); } };
+  ctx.beginPath();
+  for (let x = gx0; x <= gx1; x++) seg([x, gy0, gz], [x, gy1, gz]);
+  for (let y = gy0; y <= gy1; y++) seg([gx0, y, gz], [gx1, y, gz]);
+  ctx.stroke();
+
+  const marks = [];
+  for (const side of ['L', 'R']) {
+    const tr = view.tracks[side];
+    if (!tr) continue;
+    const color = sideColor(side);
+    const n = tr.t.length;
+    const stride = Math.max(1, Math.ceil(n / 4000));
+    const cur = stateAt(tr, view.t);
+    const path = (from, to, width, alpha) => {
+      ctx.beginPath();
+      let started = false;
+      // Every stride-th sample, and always the last one, so the line ends
+      // exactly where the marker is.
+      for (let k = from; ; k = Math.min(k + stride, to)) {
+        const q = P([tr.x[k], tr.y[k], tr.z[k]]);
+        if (!q) started = false;
+        else if (!started) { ctx.moveTo(q[0], q[1]); started = true; }
+        else ctx.lineTo(q[0], q[1]);
+        if (k >= to) break;
+      }
+      if (to === cur.i && !cur.before) { const q = P(cur.p); if (q && started) ctx.lineTo(q[0], q[1]); }
+      ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = width * dpr;
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      ctx.stroke(); ctx.globalAlpha = 1;
+    };
+    path(0, n - 1, 1.5, 0.22);              // whole walk, faint
+    if (!cur.before) path(0, cur.i, 2, 1);  // walked so far
+
+    if (!cur.before) {
+      // Foot glyph: a sole through the foot position, along the walking
+      // direction, tilted by the flex angle. The front part is the long one
+      // (FOOT_TOE_M vs FOOT_HEEL_M), so front and back can be told apart.
+      // Positive flex lifts the front.
+      const d = dirAt(tr, view.t);
+      const phi = (cur.flex || 0) * Math.PI / 180;
+      const u = [d[0] * Math.cos(phi), d[1] * Math.cos(phi), Math.sin(phi)];
+      const along = m => [cur.p[0] + u[0] * m, cur.p[1] + u[1] * m, cur.p[2] + u[2] * m];
+      const heel = P(along(-FOOT_HEEL_M)), toe = P(along(FOOT_TOE_M));
+      const at = P(cur.p);
+      if (heel && toe) {
+        ctx.strokeStyle = color; ctx.lineWidth = 5 * dpr; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(heel[0], heel[1]); ctx.lineTo(toe[0], toe[1]); ctx.stroke();
+      }
+      if (at) marks.push({ at, color, side });
+    }
+  }
+  // Markers last, with a surface ring so overlapping feet stay separable.
+  for (const m of marks) {
+    ctx.beginPath(); ctx.arc(m.at[0], m.at[1], 6 * dpr, 0, 2 * Math.PI);
+    ctx.fillStyle = m.color; ctx.fill();
+    ctx.lineWidth = 2 * dpr; ctx.strokeStyle = '#ffffff'; ctx.stroke();
+    ctx.font = `600 ${13 * dpr}px -apple-system, "Segoe UI", Roboto, sans-serif`;
+    ctx.fillStyle = '#10201d';
+    ctx.fillText(m.side, m.at[0] + 9 * dpr, m.at[1] - 8 * dpr);
+  }
+  ctx.font = `${12 * dpr}px -apple-system, "Segoe UI", Roboto, sans-serif`;
+  ctx.fillStyle = '#5a716c';
+  ctx.fillText(num(view.t, 1) + ' s', 10 * dpr, H - 10 * dpr);
+  renderHud();
+}
+
+function renderHud() {
+  const hud = $('hud');
+  if (!view.bounds) { hud.innerHTML = ''; return; }
+  hud.innerHTML = ['L', 'R'].filter(s => view.tracks[s]).map(side => {
+    const c = stateAt(view.tracks[side], view.t);
+    const st = c.step;
+    // Coordinates as drawn (aligned, if "Gehrichtung ausrichten" is on), but
+    // height in real metres — the "Höhe" setting only stretches the drawing.
+    const zs = +$('zSel').value;
+    const now = [
+      `${side}x ${num(c.p[0], 2)} m · ${side}y ${num(c.p[1], 2)} m · ${side}z ${num(c.p[2] / zs, 2)} m`,
+      `Flex ${c.flex == null ? '–' : num(c.flex, 1) + '°'}`,
+    ];
+    const step = [`Schrittlänge ${st ? num(st.len, 2) + ' m' : '–'}`];
+    if (st) step.push(`Auftrittswinkel ${num(st.maxflex, 0)}°`, `Winkelumfang ${num(st.range, 0)}°`);
+    return `<div><i class="swatch" style="background:${sideColor(side)}"></i><b>${side}</b>`
+         + `<span>${now.join(' · ')}<br>${step.join(' · ')}</span></div>`;
+  }).join('');
+}
+
+function renderPlayer() {
+  const span = view.tMax - view.tMin;
+  $('timeSlider').value = span > 0 ? Math.round((view.t - view.tMin) / span * 1000) : 0;
+  $('timeLbl').textContent = `${num(view.t, 1)} / ${num(view.tMax, 1)} s`;
+  const pb = $('playBtn');
+  pb.textContent = view.playing ? '❚❚' : '▶';
+  pb.setAttribute('aria-label', view.playing ? 'Pause' : 'Abspielen');
+  pb.disabled = !view.bounds;
+  $('videoBtn').disabled = !view.bounds || !window.MediaRecorder || !canvas.captureStream;
+  $('videoBtn').textContent = view.recorder ? 'Video wird aufgenommen…' : 'Als Video speichern';
+}
+
+function setPlaying(on) {
+  if (on && view.t >= view.tMax) view.t = view.tMin;
+  view.playing = on && !!view.bounds;
+  view.lastFrame = performance.now();
+  if (view.playing) requestAnimationFrame(tick);
+  renderPlayer();
+}
+
+function tick(now) {
+  if (!view.playing) return;
+  view.t += (now - view.lastFrame) / 1000 * +$('speedSel').value;
+  view.lastFrame = now;
+  if (view.t >= view.tMax) { view.t = view.tMax; view.playing = false; onPlaybackEnd(); }
+  draw();
+  if (view.playing) requestAnimationFrame(tick);
+}
+
+// "Als Video speichern": the canvas is recorded while the walk plays from the
+// start at the chosen tempo. WebM where the browser offers it (Chrome,
+// Android), MP4 otherwise.
+function startVideo() {
+  if (!view.bounds || view.recorder) return;
+  const types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
+  const type = types.find(t => MediaRecorder.isTypeSupported(t));
+  if (!type) { $('srcInfo').textContent = 'Dieser Browser kann kein Video aufnehmen.'; return; }
+  const chunks = [];
+  const mr = new MediaRecorder(canvas.captureStream(30), { mimeType: type });
+  mr.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  mr.onstop = () => {
+    view.recorder = null;
+    const ext = type.startsWith('video/mp4') ? 'mp4' : 'webm';
+    const base = dataset?.t0 ? fileBase(new Date(dataset.t0)) : 'novapace';
+    download(`${base}_3d.${ext}`, new Blob(chunks, { type: type.split(';')[0] }));
+    renderPlayer();
+  };
+  view.recorder = mr;
+  view.t = view.tMin;
+  mr.start();
+  setPlaying(true);
+}
+function onPlaybackEnd() {
+  if (view.recorder) setTimeout(() => view.recorder && view.recorder.stop(), 300);
+}
+
+// ---- Camera interaction --------------------------------------------
+const pointers = new Map();
+let pinchDist = 0;
+canvas.addEventListener('pointerdown', e => {
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  if (pointers.size === 2) { const [a, b] = [...pointers.values()]; pinchDist = Math.hypot(a[0] - b[0], a[1] - b[1]); }
+});
+canvas.addEventListener('pointermove', e => {
+  if (!pointers.has(e.pointerId)) return;
+  const prev = pointers.get(e.pointerId);
+  pointers.set(e.pointerId, [e.clientX, e.clientY]);
+  if (pointers.size === 1) {
+    view.az -= (e.clientX - prev[0]) * 0.008;
+    view.el = Math.min(1.5, Math.max(0.05, view.el + (e.clientY - prev[1]) * 0.006));
+  } else if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (pinchDist > 0) zoom(pinchDist / d);
+    pinchDist = d;
+  }
+  if (!view.playing) draw();
+});
+const endPointer = e => { pointers.delete(e.pointerId); pinchDist = 0; };
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('wheel', e => { e.preventDefault(); zoom(Math.exp(e.deltaY * 0.001)); if (!view.playing) draw(); },
+                        { passive: false });
+canvas.addEventListener('dblclick', () => { resetCamera(); draw(); });
+function zoom(f) { view.dist = Math.min(view.fit * 6, Math.max(0.5, view.dist * f)); }
+
+// =====================================================================
+//  Threshold feedback
+// =====================================================================
+function renderThresholds() {
+  const box = $('thresholds');
+  if (!box.childElementCount) {
+    box.innerHTML = THRESHOLDS.map(d => `
+      <div class="thr" data-key="${d.key}">
+        <div class="top">
+          <span class="name" id="thrName${d.key}">${d.name} <b id="thrVal${d.key}"></b></span>
+          <div class="switchrow">
+            <button class="sw" role="switch" aria-checked="false" id="thrSw${d.key}"
+                    aria-labelledby="thrName${d.key}"><span class="knob"></span></button>
+            <span class="state" id="thrState${d.key}">aus</span>
+          </div>
+        </div>
+        <div class="slider">
+          <button class="nudge" data-for="thrIn${d.key}" data-dir="-1" aria-label="${d.name} verringern">−</button>
+          <input type="range" id="thrIn${d.key}" min="${d.min}" max="${d.max}" step="1" aria-label="${d.name}">
+          <button class="nudge" data-for="thrIn${d.key}" data-dir="1" aria-label="${d.name} erhöhen">+</button>
+        </div>
+        <div class="stat" id="thrStat${d.key}"></div>
+      </div>`).join('');
+    for (const d of THRESHOLDS) {
+      $('thrSw' + d.key).addEventListener('click', () => {
+        state.fb[d.key].on = state.fb[d.key].on ? 0 : 1;
+        renderThresholds();
+        broadcast(thrCmd(d.key));
+      });
+      $('thrIn' + d.key).addEventListener('input', e => {
+        state.fb[d.key].v = +e.target.value;
+        renderThresholds();
+        pushThreshold(d.key);
+      });
+    }
+    wireNudges(box);
+  }
+  const connected = state.clips.length > 0;
+  for (const d of THRESHOLDS) {
+    const t = state.fb[d.key];
+    $('thrVal' + d.key).textContent = d.fmt(t.v);
+    $('thrIn' + d.key).value = t.v;
+    const sw = $('thrSw' + d.key);
+    sw.setAttribute('aria-checked', t.on ? 'true' : 'false');
+    const stEl = $('thrState' + d.key);
+    stEl.textContent = t.on ? 'an' : 'aus';
+    stEl.classList.toggle('on', !!t.on);
+    for (const el of box.querySelectorAll(`[data-key="${d.key}"] button, [data-key="${d.key}"] input`)) {
+      if (!el.closest('.stat')) el.disabled = !connected;
+    }
+  }
+  $('intensity').value = state.intensity;
+  $('intVal').textContent = state.intensity;
+  $('intensity').disabled = !connected;
+  $('pulseBtn').disabled = !connected;
+  document.querySelectorAll('[data-for="intensity"]').forEach(b => { b.disabled = !connected; });
+  renderStats();
+}
+
+const pushThresholdNow = k => broadcast(thrCmd(k));
+const pushThresholdDeb = { L: debounce(pushThresholdNow, 150), F: debounce(pushThresholdNow, 150),
+                           R: debounce(pushThresholdNow, 150) };
+const pushThreshold = k => pushThresholdDeb[k](k);
+const pushIntensity = debounce(v => broadcast('V' + pad(v, 2)), 150);
+
+// Plus/minus next to a slider: set the slider and fire its input event, so
+// every change still runs through exactly one handler.
+function wireNudges(root) {
+  root.querySelectorAll('.nudge').forEach(b => b.addEventListener('click', () => {
+    const input = $(b.dataset.for);
+    const next = Math.min(+input.max, Math.max(+input.min, +input.value + (+b.dataset.dir) * (+input.step || 1)));
+    if (next === +input.value) return;
+    input.value = next;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }));
+}
+
+// Steps of the loaded recording that the clip would have evaluated: not on
+// stairs, not in a curve, not inside either countdown, not an artifact.
+function eligibleSteps() {
+  if (!dataset) return [];
+  return Object.values(dataset.sides).flatMap(s => s.steps)
+    .filter(s => !(s.flags & (F.CURVE | F.STAIRS | F.EXCLUDED)) && s.len >= ARTIFACT_MAX_M);
+}
+function quantile(sorted, q) {
+  if (!sorted.length) return NaN;
+  const pos = (sorted.length - 1) * q, lo = Math.floor(pos), hi = Math.ceil(pos);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+// The statistics are what turns a recording into a threshold: median and
+// 10th percentile of each parameter over the straight, level steps. Taking
+// the 10th percentile as the threshold means roughly one step in ten of
+// this wearer's recorded gait would have been cued — a starting point the
+// therapist adjusts, not a rule.
+function renderStats() {
+  const steps = eligibleSteps();
+  for (const d of THRESHOLDS) {
+    const el = $('thrStat' + d.key);
+    if (!el) continue;
+    if (!steps.length) { el.innerHTML = '<span>Keine Aufnahme geladen — Statistik erscheint nach einer Aufnahme.</span>'; continue; }
+    const vals = steps.map(d.stepVal).filter(Number.isFinite).sort((a, b) => a - b);
+    const med = quantile(vals, 0.5), p10 = quantile(vals, 0.1);
+    const sugg = Math.min(d.max, Math.max(d.min, Math.round(p10)));
+    el.innerHTML = `<span>Aufnahme: Median ${d.fmt(Math.round(med))} · 10-%-Wert ${d.fmt(sugg)}</span>`
+      + `<button data-sugg="${d.key}" data-v="${sugg}"${state.clips.length ? '' : ' disabled'}>10-%-Wert übernehmen</button>`;
+  }
+  document.querySelectorAll('[data-sugg]').forEach(b => b.addEventListener('click', () => {
+    const k = b.dataset.sugg;
+    state.fb[k] = { on: 1, v: +b.dataset.v };
+    renderThresholds();
+    broadcast(thrCmd(k));
+  }));
+
+  const sum = $('fbSummary');
+  const active = THRESHOLDS.filter(d => state.fb[d.key].on);
+  if (!steps.length) { sum.textContent = ''; return; }
+  if (!active.length) {
+    sum.textContent = `${steps.length} gerade Schritte in der Aufnahme. Keine Schwelle eingeschaltet — der Clip vibriert nicht.`;
+    return;
+  }
+  const hits = steps.filter(s => active.some(d => d.stepVal(s) < state.fb[d.key].v));
+  sum.textContent = `Mit diesen Schwellen hätten ${hits.length} von ${steps.length} geraden Schritten `
+    + `der Aufnahme vibriert (${Math.round(hits.length / steps.length * 100)} %).`;
+}
+
+function stepOutcome(s) {
+  if (s.flags & F.VIBRATE) {
+    const why = THRESHOLDS.filter(d => s.flags & d.bit).map(d => d.unitNote);
+    return ['vib', 'Vibration (' + why.join(', ') + ')'];
+  }
+  if (s.flags & F.STAIRS) return ['skip', 'Treppe — ausgenommen'];
+  if (s.flags & F.CURVE) return ['skip', 'Kurve — ausgenommen'];
+  if (s.flags & F.EXCLUDED) {
+    const why = s.flags & F.LOCKOUT ? 'nach Treppe' : 'Ausreißer';
+    return ['skip', 'ausgenommen (' + why + ')'];
+  }
+  return ['', 'ok'];
+}
+
+function renderFeed() {
+  const ul = $('feed');
+  if (!state.feed.length) { ul.innerHTML = '<li><span class="hint">Noch keine Schritte.</span></li>'; return; }
+  ul.innerHTML = state.feed.map(s => {
+    const [cls, txt] = stepOutcome(s);
+    return `<li><b>${s.side}</b>`
+      + `<span>${num(s.len, 2)} m</span><span>Auftrittswinkel ${num(s.maxflex, 0)}°</span><span>Winkelumfang ${num(s.range, 0)}°</span>`
+      + `<span class="what ${cls}">${txt}</span></li>`;
+  }).join('');
+}
+
+// =====================================================================
+//  Rendering: clips, tiles
+// =====================================================================
+const BATT_CELLS = 5, BATT_RESERVE_PCT = 3;
+function batteryIcon(c) {
+  if (c.batt == null) return '';
+  const usable = (c.batt - BATT_RESERVE_PCT) / (100 - BATT_RESERVE_PCT) * 100;
+  const n = usable <= 0 ? 0 : Math.min(BATT_CELLS, Math.ceil(usable / (100 / BATT_CELLS)));
+  let cells = '';
+  for (let i = 0; i < BATT_CELLS; i++) {
+    cells += `<rect class="cell${i < n ? ' on' : ''}" x="${(2.4 + i * 4.65).toFixed(2)}" y="3" width="3.6" height="8" rx="0.8"/>`;
+  }
+  return `<svg class="batt${c.batt < 15 ? ' low' : ''}" viewBox="0 0 30 14" width="30" height="14" role="img"`
+       + ` aria-label="Akku ${n} von ${BATT_CELLS}"><rect class="shell" x="0.6" y="0.6" width="25.8" height="12.8" rx="2.6"/>`
+       + `<rect class="cap" x="27.2" y="4.4" width="2.2" height="5.2" rx="1"/>${cells}</svg>`;
+}
+
+function renderClips() {
+  const box = $('clips');
+  box.innerHTML = '';
+  if (!state.clips.length) { box.innerHTML = '<span class="hint">Kein Clip verbunden.</span>'; }
+  for (const c of [...state.clips].sort((a, b) => a.side.localeCompare(b.side))) {
+    const el = document.createElement('span');
+    el.className = 'chip';
+    el.innerHTML = `<span class="dot ${c.side}"></span>${sideName(c.side)}${batteryIcon(c)}`;
+    const x = document.createElement('button');
+    x.textContent = '✕';
+    x.setAttribute('aria-label', sideName(c.side) + ' trennen');
+    x.onclick = () => { if (c.device.gatt.connected) c.device.gatt.disconnect(); else onDisconnected(c); };
+    el.appendChild(x);
+    box.appendChild(el);
+  }
+  const low = state.clips.filter(c => c.batt != null && c.batt < 15).map(c => sideName(c.side).toLowerCase());
+  if (low.length) {
+    const h = document.createElement('span');
+    h.className = 'hint';
+    h.textContent = `Akku fast leer (${low.join(' + ')}) — bitte laden.`;
+    box.appendChild(h);
+  }
+  const locked = state.clips.filter(c => c.lockout).map(c => sideName(c.side).toLowerCase());
+  $('lockBanner').hidden = !locked.length;
+  $('lockBanner').textContent = `Treppe erkannt (${locked.join(' + ')}) — jede Vibration gesperrt.`;
+}
+
+function renderTiles() {
+  const box = $('tiles');
+  box.innerHTML = [...state.clips].sort((a, b) => a.side.localeCompare(b.side)).map(c => {
+    const s = c.lastStep;
+    return `<div class="tile"><div class="lbl">${sideName(c.side)} · Flexwinkel</div>`
+      + `<div class="val">${c.liveFlex == null ? '–' : num(c.liveFlex, 1) + '°'}</div>`
+      + `<div class="sub">Schrittlänge ${s ? num(s.len, 2) + ' m' : '–'} · Höhe ${s ? num(s.h, 2) + ' m' : '–'}</div>`
+      + `<div class="sub">Auftrittswinkel ${s ? num(s.maxflex, 0) + '°' : '–'} · Winkelumfang ${s ? num(s.range, 0) + '°' : '–'}</div></div>`;
+  }).join('');
+}
+let tilesPending = false;
+function renderTilesThrottled() {
+  if (tilesPending) return;
+  tilesPending = true;
+  setTimeout(() => { tilesPending = false; renderTiles(); }, 150);
+}
+
+function renderAll() {
+  renderConnStatus();
+  renderClips();
+  renderTiles();
+  renderRec();
+  renderThresholds();
+}
+
+// =====================================================================
+//  Wiring
+// =====================================================================
+$('connectBtn').addEventListener('click', connect);
+$('recBtn').addEventListener('click', () => { if (rec.on) recStop(); else recStart(); });
+$('refreshBtn').addEventListener('click', () => loadDataset(datasetFromRecording()));
+$('csvInput').addEventListener('change', e => { loadCsvFiles([...e.target.files]); e.target.value = ''; });
+$('playBtn').addEventListener('click', () => setPlaying(!view.playing));
+$('timeSlider').addEventListener('input', e => {
+  view.t = view.tMin + (+e.target.value / 1000) * (view.tMax - view.tMin);
+  if (!view.playing) draw();
+});
+$('zSel').addEventListener('change', () => { buildTracks(); draw(); });
+$('alignChk').addEventListener('change', () => { buildTracks(); resetCamera(); draw(); });
+$('resetViewBtn').addEventListener('click', () => { resetCamera(); draw(); });
+$('videoBtn').addEventListener('click', startVideo);
+$('intensity').addEventListener('input', e => {
+  state.intensity = +e.target.value;
+  $('intVal').textContent = state.intensity;
+  pushIntensity(state.intensity);
+});
+$('pulseBtn').addEventListener('click', () => broadcast('P'));
+wireNudges(document.querySelector('#fbCard > .thr'));
+window.addEventListener('resize', () => draw());
+
+const logoEl = $('logo');
+logoEl.addEventListener('error', () => { logoEl.hidden = true; $('wordmark').hidden = false; });
+
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW:', e)));
+}
+
+renderAll();
+renderFeed();
+draw();
+</script>
+</body>
+</html>
