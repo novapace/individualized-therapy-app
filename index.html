@@ -171,6 +171,9 @@
   <section class="card" id="recCard">
     <h2>Daten aufnehmen</h2>
     <div class="clips" id="clips"><span class="hint">Kein Clip verbunden.</span></div>
+    <!-- Bangle.js 2, optional. Misst den Armschwung und zeigt bei jeder
+         Vibration den Grund — siehe „Uhr (Bangle.js 2)“ im Skript. -->
+    <div class="clips" id="watchRow"></div>
     <div class="lock" id="lockBanner" hidden></div>
     <div class="row"><button id="recBtn" class="start">Aufnahme starten</button></div>
     <div class="hint" id="recInfo">
@@ -227,8 +230,31 @@
       dieses Fußes eine Vibration aus. Ausgenommen sind Treppenschritte (und die drei
       danach) sowie Kurvenschritte selbst — dieselbe Erkennung wie im
       Patienten-Clip. Die Schwellen werden im Clip gespeichert und gelten auch ohne Telefon.
+      Mit verbundener Uhr zeigt sie bei jeder Vibration den Grund; die Armschwung-Schwelle
+      darunter wirkt nur, solange die Uhr mit diesem Telefon verbunden ist.
     </div>
     <div id="thresholds"></div>
+    <!-- Vierte Schwelle, aber nicht im Clip: der Clip sieht den Arm nicht.
+         Gespeichert im Telefon und nur wirksam, solange die Uhr mit diesem
+         Telefon verbunden ist — anders als die drei darüber. -->
+    <div class="thr" id="armThr">
+      <div class="top">
+        <span class="name" id="armName">Mindest-Armschwung (Uhr) <b id="armVal"></b></span>
+        <div class="switchrow">
+          <button class="sw" role="switch" aria-checked="false" id="armSw"
+                  aria-labelledby="armName"><span class="knob"></span></button>
+          <span class="state" id="armState">aus</span>
+        </div>
+      </div>
+      <div class="slider">
+        <button class="nudge" data-for="armIn" data-dir="-1" aria-label="Mindest-Armschwung verringern">−</button>
+        <input type="range" id="armIn" min="0" max="90" step="1" aria-label="Mindest-Armschwung">
+        <button class="nudge" data-for="armIn" data-dir="1" aria-label="Mindest-Armschwung erhöhen">+</button>
+      </div>
+      <div class="stat" id="armStat"></div>
+      <div class="hint" id="armRead">Keine Uhr verbunden.</div>
+      <div class="row"><button class="secondary" id="armCalBtn" disabled>Uhr kalibrieren</button></div>
+    </div>
     <div class="hint" id="fbSummary"></div>
     <div class="thr">
       <div class="top"><span class="name">Vibrationsstärke <b id="intVal">7</b></span>
@@ -246,6 +272,308 @@
   </section>
 
 </main>
+
+<!-- Die Uhr-App fuer die Bangle.js 2. Steht HIER und nicht in einer eigenen
+     Datei, aus demselben Grund, aus dem die ganze App eine Datei ist: sie muss
+     auch ueber file:// laufen, und dort darf eine Seite nichts nachladen.
+     type="text/plain", damit der Browser sie nicht ausfuehrt — sie ist
+     Espruino-JavaScript fuer die Uhr. installBangleApp() schreibt sie ueber
+     die Bluetooth-Konsole der Uhr in deren Speicher und startet sie; von Hand
+     installieren muss sie niemand. Ganzzeilige //-Kommentare und Einrueckung
+     werden vor dem Senden entfernt (bangleAppCode()), Kommentare also bitte
+     nur auf eigenen Zeilen.
+
+     Alles in diesem Block muss reines ASCII sein: Umlaute als \xFC usw. Die
+     Uhr speichert Bytes, und ein UTF-8-Umlaut im Quelltext waeren dort zwei
+     Zeichen. -->
+<script type="text/plain" id="bangleApp">
+// novapace -- Uhr-App fuer die Bangle.js 2.
+//
+// Zwei Aufgaben, beide vom Telefon angestossen:
+//   1. Anzeigen, WARUM gerade vibriert wurde (NP.cue).
+//   2. Den Armschwung des letzten Schritts messen (NP.s) -- das Telefon
+//      vergleicht ihn mit der Schwelle und laesst die Uhr dann vibrieren.
+//
+// Die Uhr entscheidet nichts selbst. Schwelle und Ausnahmen (Treppe, Kurve,
+// Ausreisser) bleiben an einer Stelle, im Telefon, das auch die Clips sieht.
+//
+// Antworten gehen als eine Zeile "NP:{json}" ueber die Bluetooth-Konsole.
+// Das Telefon liest nur Zeilen mit diesem Praefix, alles andere, was die
+// Konsole schreibt, faellt damit von selbst heraus.
+//
+// WARUM DER KOMPASS UND NICHT DER BESCHLEUNIGUNGSSENSOR. Die Bangle.js 2 hat
+// kein Gyroskop. Den Winkel aus der Schwerkraftrichtung zu lesen, geht beim
+// schwingenden Arm nicht: der Arm ist ein Pendel, und an der Hand eines
+// Pendels zeigt die gemessene Beschleunigung immer ungefaehr am Arm entlang.
+// Die Tangentialbeschleunigung hebt den Schwerkraftanteil ungefaehr auf.
+// Bei 0,6 Hz Schwungfrequenz und 65 cm Arm geht er gegen null, bei 1 Hz
+// erscheint er mit umgekehrtem Vorzeichen und 1,6-fach. Die Zahl haengt
+// damit staerker an der Kadenz als am Arm. Das Erdmagnetfeld kennt keine
+// Beschleunigung: dreht sich das Handgelenk um x Grad, dreht sich das Feld
+// in der Uhr um x Grad.
+//
+// Der Preis: der Kompass muss kalibriert sein (NP.cal, einmal pro Uhr), und
+// Eisen in der Naehe (Laufband, Stahltraeger) verzerrt das Feld. Beides wird
+// mitgemeldet, statt einen falschen Winkel zu liefern.
+var VER = (typeof NP_H == "string") ? NP_H : "dev";
+var STORE = "novapace.json";
+// Ring der kalibrierten Kompass-Samples. 12,5 Hz (der 80-ms-Standardtakt der
+// Uhr) mal 40 sind 3,2 s, laenger als der laengste Schritt, nach dem das
+// Telefon fragt (2,5 s).
+var N = 40;
+var bx = new Float32Array(N), by = new Float32Array(N), bz = new Float32Array(N);
+var bt = new Float64Array(N);
+var head = 0, count = 0;
+var cal = require("Storage").readJSON(STORE, 1);
+if (!cal || !cal.o || !cal.s) cal = null;
+var calRun = null;
+var CAL_MS = 20000;
+// Solange der eigene Motor laeuft, werden keine Samples genommen: seine
+// Spule sitzt wenige Millimeter neben dem Kompass. Ob das am Geraet ueberhaupt
+// stoert, ist nicht gemessen -- BUZZ_QUIET_S ist der Nachlauf nach dem Impuls
+// und laesst sich auf 0 setzen, falls nicht. Die Luecke kostet die Messung
+// des naechsten Schritts (sway() verwirft Fenster mit Loch, s. GAP_MAX_S).
+var quietUntil = 0;
+var BUZZ_QUIET_S = 0.1;
+// Groesste erlaubte Luecke im Messfenster, Fensterraender eingeschlossen.
+// Ein Fenster mit Loch saehe nur einen Teil des Schwungs und laese ihn zu
+// KLEIN -- also genau in die Richtung, die einen Reiz ausloest. Lieber kein
+// Wert als ein zu kleiner. 0,25 s sind drei ausgefallene Samples bei 12,5 Hz.
+var GAP_MAX_S = 0.25;
+var CUE_MS = 8000;
+var ui = { sway: null, thr: 0, cue: null, cueTimer: 0, linked: NRF.getSecurityStatus().connected };
+
+function out(o) { Bluetooth.println("NP:" + JSON.stringify(o)); }
+
+function onMag(m) {
+  if (calRun) {
+    var v = [m.x, m.y, m.z];
+    for (var k = 0; k < 3; k++) {
+      if (v[k] < calRun.lo[k]) calRun.lo[k] = v[k];
+      if (v[k] > calRun.hi[k]) calRun.hi[k] = v[k];
+    }
+    calRun.n++;
+    return;
+  }
+  if (!cal || getTime() < quietUntil) return;
+  bx[head] = (m.x - cal.o[0]) / cal.s[0];
+  by[head] = (m.y - cal.o[1]) / cal.s[1];
+  bz[head] = (m.z - cal.o[2]) / cal.s[2];
+  bt[head] = getTime();
+  head = (head + 1) % N;
+  if (count < N) count++;
+}
+
+// Armschwung ueber die letzten ms Millisekunden, in Grad von Anschlag zu
+// Anschlag. Das Telefon schickt als ms die Dauer des letzten Doppelschritts
+// DESSELBEN Clips, also genau einen ganzen Schwung vor und zurueck. Ein
+// kuerzeres Fenster saehe je nach Phase mal den ganzen Schwung, mal den halben.
+//
+// Rechnung: der mittlere Feldvektor m ist die Ruhelage. Die Abweichungen
+// davon liegen beim Schwingen auf einer Linie, deren Richtung e die
+// Hauptachse ihrer Kovarianz ist. Der Winkel jedes Samples ist
+// atan2(v.e, v.m), der Armschwung die Spanne dieser Winkel. Unterschaetzt um
+// den Sinus des Winkels zwischen Drehachse und Feld, in Deutschland
+// hoechstens um rund 10 % (Gehen in Ost-West-Richtung).
+function sway(ms) {
+  ms = Math.min(Math.max(ms || 1200, 600), 2500);
+  if (!cal) return { t: "s", a: null, why: "cal" };
+  var from = getTime() - ms / 1000;
+  var ix = [], k, i, j;
+  for (k = 0; k < count; k++) {
+    i = (head - 1 - k + N) % N;
+    if (bt[i] < from) break;
+    ix.push(i);
+  }
+  var n = ix.length;
+  if (n < 6) return { t: "s", a: null, why: "n", n: n };
+  // ix laeuft vom neuesten zum aeltesten Sample.
+  var gap = Math.max(getTime() - bt[ix[0]], bt[ix[n - 1]] - from);
+  for (j = 1; j < n; j++) gap = Math.max(gap, bt[ix[j - 1]] - bt[ix[j]]);
+  if (gap > GAP_MAX_S) return { t: "s", a: null, why: "gap", n: n };
+  var x, y, z, mx = 0, my = 0, mz = 0, f = 0;
+  for (j = 0; j < n; j++) {
+    i = ix[j]; x = bx[i]; y = by[i]; z = bz[i];
+    mx += x; my += y; mz += z;
+    f += Math.sqrt(x * x + y * y + z * z);
+  }
+  // f: Feldstaerke relativ zur Kalibrierung, 1 = ungestoert.
+  f /= n;
+  var ml = Math.sqrt(mx * mx + my * my + mz * mz);
+  if (ml < 1e-6) return { t: "s", a: null, why: "f", n: n };
+  mx /= ml; my /= ml; mz /= ml;
+  var cxx = 0, cxy = 0, cxz = 0, cyy = 0, cyz = 0, czz = 0, p, dx, dy, dz;
+  for (j = 0; j < n; j++) {
+    i = ix[j]; x = bx[i]; y = by[i]; z = bz[i];
+    p = x * mx + y * my + z * mz;
+    dx = x - p * mx; dy = y - p * my; dz = z - p * mz;
+    cxx += dx * dx; cxy += dx * dy; cxz += dx * dz;
+    cyy += dy * dy; cyz += dy * dz; czz += dz * dz;
+  }
+  // Startvektor senkrecht zu m, dann Potenziteration auf die Hauptachse.
+  var ex, ey, ez, nx, ny, nz, nl;
+  if (Math.abs(mx) < 0.9) { ex = 0; ey = mz; ez = -my; } else { ex = -mz; ey = 0; ez = mx; }
+  nl = Math.sqrt(ex * ex + ey * ey + ez * ez);
+  ex /= nl; ey /= nl; ez /= nl;
+  for (k = 0; k < 12; k++) {
+    nx = cxx * ex + cxy * ey + cxz * ez;
+    ny = cxy * ex + cyy * ey + cyz * ez;
+    nz = cxz * ex + cyz * ey + czz * ez;
+    nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    // Keine Bewegung: e bleibt beim Startvektor, die Spanne wird ~0.
+    if (nl < 1e-12) break;
+    ex = nx / nl; ey = ny / nl; ez = nz / nl;
+  }
+  var lo = 1e9, hi = -1e9, a;
+  for (j = 0; j < n; j++) {
+    i = ix[j]; x = bx[i]; y = by[i]; z = bz[i];
+    a = Math.atan2(x * ex + y * ey + z * ez, x * mx + y * my + z * mz);
+    if (a < lo) lo = a;
+    if (a > hi) hi = a;
+  }
+  var deg = (hi - lo) * 180 / Math.PI;
+  return { t: "s", a: Math.round(deg * 10) / 10, n: n, f: Math.round(f * 100) / 100 };
+}
+
+// Harte Kalibrierung: 20 s die Uhr in alle Richtungen drehen. Minimum und
+// Maximum jeder Achse ergeben Versatz (Mitte) und Skala (halbe Spanne). Die
+// eingebaute Kalibrierung der Uhr (dx/dy/dz im mag-Ereignis) taugt dafuer
+// nicht: sie faengt bei jedem Einschalten des Kompasses von vorn an.
+// Gespeichert in novapace.json, gilt also bis zur naechsten Kalibrierung.
+function calStart() {
+  if (calRun) return;
+  calRun = { lo: [1e9, 1e9, 1e9], hi: [-1e9, -1e9, -1e9], n: 0, t0: getTime() };
+  calRun.tick = setInterval(draw, 1000);
+  setTimeout(calEnd, CAL_MS);
+  Bangle.setLCDPower(1);
+  draw();
+}
+
+function calEnd() {
+  var c = calRun;
+  clearInterval(c.tick);
+  calRun = null;
+  var o = [], s = [], k;
+  for (k = 0; k < 3; k++) { o.push((c.hi[k] + c.lo[k]) / 2); s.push((c.hi[k] - c.lo[k]) / 2); }
+  var smin = Math.min(s[0], s[1], s[2]), smax = Math.max(s[0], s[1], s[2]);
+  // Rund heisst: in jede Richtung gedreht. Eine Achse mit deutlich kleinerer
+  // Spanne wurde nicht ausgefahren, und deren Versatz waere geraten.
+  var round = smax > 0 ? smin / smax : 0;
+  var ok = c.n > 100 && smin > 0 && round > 0.6;
+  if (ok) {
+    cal = { o: o, s: s };
+    require("Storage").writeJSON(STORE, cal);
+    count = 0;
+  }
+  out({ t: "cal", ok: ok, r: Math.round(round * 100) / 100, n: c.n });
+  showCue(ok ? "Kalibriert" : "Nicht kalibriert",
+          ok ? "" : "Noch einmal, Uhr in alle Richtungen drehen", 0, 0);
+}
+
+function showCue(title, sub, buzz, strength) {
+  ui.cue = { title: title, sub: sub || "" };
+  Bangle.setLCDPower(1);
+  draw();
+  if (buzz > 0) {
+    // Doppelimpuls: am Handgelenk anders zu spueren als der Clip am Fuss.
+    quietUntil = getTime() + (2 * buzz + 120) / 1000 + BUZZ_QUIET_S;
+    Bangle.buzz(buzz, strength).then(function () {
+      setTimeout(function () { Bangle.buzz(buzz, strength); }, 120);
+    });
+  }
+  if (ui.cueTimer) clearTimeout(ui.cueTimer);
+  ui.cueTimer = setTimeout(function () { ui.cue = null; ui.cueTimer = 0; draw(); }, CUE_MS);
+}
+
+function two(v) { return ("0" + v).substr(-2); }
+
+function draw() {
+  var W = g.getWidth(), H = g.getHeight();
+  g.reset().setBgColor(0, 0, 0).clearRect(0, 0, W - 1, H - 1).setColor(1, 1, 1).setFontAlign(0, 0);
+  if (calRun) {
+    var left = Math.max(0, Math.ceil(CAL_MS / 1000 - (getTime() - calRun.t0)));
+    g.setFont("Vector", 22).drawString("Uhr langsam\nin alle\nRichtungen\ndrehen", W / 2, H / 2 - 22);
+    g.setFont("Vector", 36).drawString(left, W / 2, H - 26);
+    return;
+  }
+  if (ui.cue) {
+    // Schwarz auf Gelb: die eine Farbkombination, die auf dem
+    // reflektierenden Display auch in der Sonne traegt.
+    g.setBgColor(1, 1, 0).clearRect(0, 0, W - 1, H - 1).setColor(0, 0, 0);
+    // title ist ein String oder eine Liste von Gruenden (ein Schritt kann
+    // unter mehreren Schwellen liegen). Die groesste Schrift, die passt.
+    var room = ui.cue.sub ? H * 0.62 : H - 8, sizes = [28, 22, 18], lines, k, j;
+    for (k = 0; k < sizes.length; k++) {
+      g.setFont("Vector", sizes[k]);
+      lines = [];
+      var parts = [].concat(ui.cue.title);
+      for (j = 0; j < parts.length; j++) lines = lines.concat(g.wrapString(parts[j], W - 12));
+      if (lines.length * sizes[k] * 1.1 <= room) break;
+    }
+    g.drawString(lines.join("\n"), W / 2, ui.cue.sub ? H * 0.36 : H / 2);
+    if (ui.cue.sub) {
+      g.setFont("Vector", 20);
+      g.drawString(g.wrapString(ui.cue.sub, W - 12).join("\n"), W / 2, H * 0.78);
+    }
+    return;
+  }
+  var d = new Date();
+  g.setFont("Vector", 30).drawString(two(d.getHours()) + ":" + two(d.getMinutes()), W / 2, 22);
+  g.setFont("Vector", 20).drawString("Armschwung", W / 2, 62);
+  g.setFont("Vector", 50).drawString(ui.sway == null ? "--" : Math.round(ui.sway) + "\xB0", W / 2, 104);
+  var foot = !cal ? "nicht kalibriert"
+           : !ui.linked ? "Telefon getrennt"
+           : ui.thr > 0 ? "Ziel: ab " + ui.thr + "\xB0" : "";
+  if (!cal || !ui.linked) g.setColor(1, 1, 0);
+  g.setFont("Vector", 18).drawString(foot, W / 2, 152);
+}
+
+// Uhrzeit zur vollen Minute nachziehen.
+function minuteTick() {
+  draw();
+  setTimeout(minuteTick, 60000 - (Date.now() % 60000));
+}
+
+// Die Befehle, die das Telefon aufruft. Global, weil das Telefon sie als
+// Konsolenzeile schickt, also im globalen Gueltigkeitsbereich ausfuehrt.
+var NP = {
+  h: VER,
+  hi: function () { out({ t: "hi", h: VER, cal: !!cal, bat: E.getBattery() }); },
+  s: function (ms) {
+    var r = sway(ms);
+    // Nur ungestoerte Messungen auf das Zifferblatt: ein Wert aus einem
+    // verzerrten Feld ist keiner.
+    if (r.a != null && r.f > 0.65 && r.f < 1.35) {
+      ui.sway = r.a;
+      if (!ui.cue && !calRun) draw();
+    }
+    out(r);
+  },
+  cue: function (title, sub, buzz, strength) { if (!calRun) showCue(title, sub, buzz, strength); },
+  cfg: function (o) { ui.thr = o.thr || 0; if (!ui.cue && !calRun) draw(); },
+  cal: function () { calStart(); }
+};
+
+NRF.on("connect", function () { ui.linked = true; draw(); });
+NRF.on("disconnect", function () { ui.linked = false; draw(); });
+// Knopf: Meldung wegdruecken. Langes Halten verlaesst die App wie ueblich.
+Bangle.setUI({ mode: "custom", btn: function () {
+  if (ui.cue) { clearTimeout(ui.cueTimer); ui.cueTimer = 0; ui.cue = null; draw(); }
+} });
+// setPollInterval schaltet zugleich die Stromsparautomatik ab, die nach einer
+// Minute Stillstand auf 800 ms drosselt. Die ersten Schritte nach einer Pause
+// haetten sonst kaum Samples.
+Bangle.setPollInterval(80);
+Bangle.setCompassPower(1, "novapace");
+Bangle.on("mag", onMag);
+E.on("kill", function () {
+  Bangle.setCompassPower(0, "novapace");
+  Bangle.setOptions({ powerSave: true });
+});
+g.clear();
+minuteTick();
+out({ t: "ready", h: VER, cal: !!cal });
+</script>
 
 <script>
 'use strict';
@@ -351,6 +679,7 @@ async function connect() {
       pend: new Map(),     // seq -> { s, pts, got, timer }
       live: [],            // recent { tc, flex } from status frames, for gap filling
       liveFlex: null, lastStep: null, stepNo: 0, lastSwingEnd: -Infinity,
+      prevStepEnd: null,   // Ende des vorigen echten Schritts: Doppelschrittdauer für die Uhr
       batt: null, lockout: false,
     };
     // Unlock first: until then the clip ignores commands and sends nothing,
@@ -551,6 +880,10 @@ function completeStep(clip, seq) {
   if (state.feed.length > 8) state.feed.length = 8;
   renderFeed();
   renderTiles();
+
+  const stride = clip.prevStepEnd == null ? 0 : step.t1 - clip.prevStepEnd;
+  clip.prevStepEnd = step.t1;
+  bangleOnStep(clip, step, stride);
 }
 
 // =====================================================================
@@ -591,7 +924,7 @@ function recSwing(clip, step, st, counted, pts) {
 
 const REC_COLUMNS = ['timestamp', 't_ms', 'side', 'phase', 'step', 'x_m', 'y_m', 'z_m', 'flex_deg',
   'step_length_m', 'step_height_m', 'step_max_flex_deg', 'step_flex_range_deg', 'step_turn_deg',
-  'curve', 'stairs', 'excluded', 'vibration'];
+  'curve', 'stairs', 'excluded', 'vibration', 'step_arm_sway_deg', 'arm_vibration'];
 
 const stamp = ms => {
   const d = new Date(ms);
@@ -613,6 +946,7 @@ function recCsv(side) {
       s ? s.range.toFixed(1) : '', s ? s.turn : '',
       s ? +!!(s.flags & F.CURVE) : '', s ? +!!(s.flags & F.STAIRS) : '',
       s ? +!!(s.flags & F.EXCLUDED) : '', s ? +!!(s.flags & F.VIBRATE) : '',
+      s && s.arm != null ? s.arm.toFixed(1) : '', s ? +!!s.armCue : '',
     ].join(','));
   }
   return lines.join('\n') + '\n';
@@ -730,6 +1064,10 @@ function parseCsv(text) {
                  range: +v[c.step_flex_range_deg], turn: +v[c.step_turn_deg] || 0,
                  flags: flag('curve', F.CURVE) | flag('stairs', F.STAIRS) | flag('excluded', F.EXCLUDED)
                       | flag('vibration', F.VIBRATE) };
+        // Armschwung: nur in Aufnahmen mit Uhr, und auch dort leer, wo die
+        // Uhr nicht messen konnte.
+        if (c.step_arm_sway_deg >= 0 && v[c.step_arm_sway_deg] !== '') step.arm = +v[c.step_arm_sway_deg];
+        if (c.arm_vibration >= 0 && v[c.arm_vibration] === '1') step.armCue = true;
         map.set(no, step);
         sd.steps.push(step);
       }
@@ -1205,21 +1543,27 @@ function renderStats() {
     broadcast(thrCmd(k));
   }));
 
+  renderArmStat(steps);
+
   const sum = $('fbSummary');
   const active = THRESHOLDS.filter(d => state.fb[d.key].on);
   if (!steps.length) { sum.textContent = ''; return; }
-  if (!active.length) {
+  if (!active.length && !state.arm.on) {
     sum.textContent = `${steps.length} gerade Schritte in der Aufnahme. Keine Schwelle eingeschaltet — der Clip vibriert nicht.`;
     return;
   }
-  const hits = steps.filter(s => active.some(d => d.stepVal(s) < state.fb[d.key].v));
+  // Ein Schritt ohne Armwert (Aufnahme ohne Uhr) zählt für die Armschwelle
+  // nicht: dass er nicht gemessen wurde, heißt nicht, dass er zu klein war.
+  const armLow = s => state.arm.on && s.arm != null && s.arm < state.arm.v;
+  const hits = steps.filter(s => active.some(d => d.stepVal(s) < state.fb[d.key].v) || armLow(s));
   sum.textContent = `Mit diesen Schwellen hätten ${hits.length} von ${steps.length} geraden Schritten `
     + `der Aufnahme vibriert (${Math.round(hits.length / steps.length * 100)} %).`;
 }
 
 function stepOutcome(s) {
-  if (s.flags & F.VIBRATE) {
-    const why = THRESHOLDS.filter(d => s.flags & d.bit).map(d => d.unitNote);
+  if ((s.flags & F.VIBRATE) || s.armCue) {
+    const why = THRESHOLDS.filter(d => (s.flags & F.VIBRATE) && (s.flags & d.bit)).map(d => d.unitNote);
+    if (s.armCue) why.push('Armschwung, Uhr');
     return ['vib', 'Vibration (' + why.join(', ') + ')'];
   }
   if (s.flags & F.STAIRS) return ['skip', 'Treppe — ausgenommen'];
@@ -1238,8 +1582,396 @@ function renderFeed() {
     const [cls, txt] = stepOutcome(s);
     return `<li><b>${s.side}</b>`
       + `<span>${num(s.len, 2)} m</span><span>Auftrittswinkel ${num(s.maxflex, 0)}°</span><span>Winkelumfang ${num(s.range, 0)}°</span>`
+      + (s.arm != null ? `<span>Arm ${num(s.arm, 0)}°</span>` : '')
       + `<span class="what ${cls}">${txt}</span></li>`;
   }).join('');
+}
+
+// =====================================================================
+//  Uhr (Bangle.js 2)
+// =====================================================================
+// Zwei Dinge:
+//   1. Vibriert ein Clip, zeigt die Uhr, WARUM. Der Grund steht exakt im
+//      Step-Frame (Bits 20/40/80 neben 10, threshold_feedback.h) — nichts
+//      wird hier geraten.
+//   2. Die Uhr misst den Armschwung jedes Schritts. Liegt er unter der
+//      eingeschalteten Armschwung-Schwelle, vibriert die Uhr und zeigt
+//      „Armschwung zu gering“.
+//
+// Die Armschwelle folgt den Regeln der drei Clip-Schwellen: jeder Schritt
+// darunter vibriert, KEINE Refraktärzeit, und ausgenommen ist, was der Clip
+// ausnimmt (Treppe und die drei danach, Kurve, Ausreißer) — gelesen aus den
+// Flags desselben Schritts, also mit genau der Entscheidung des Clips.
+// Anders als die drei lebt sie im Telefon: der Clip sieht den Arm nicht, und
+// ohne verbundenes Telefon misst die Uhr nichts.
+//
+// Verbunden wird über den Nordic-UART-Dienst der Bangle: was das Telefon
+// schreibt, läuft auf der Uhr als JavaScript-Zeile. Darüber wird auch die
+// Uhr-App (#bangleApp oben) installiert und gestartet, siehe
+// ensureBangleApp(). Eine Bangle, die gerade mit Gadgetbridge oder der
+// Espruino-IDE verbunden ist, erscheint im Auswahldialog nicht.
+
+const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_RX      = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';  // Telefon → Uhr
+const NUS_TX      = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';  // Uhr → Telefon
+const BANGLE_FILE = 'novapace.app.js';
+const BANGLE_INFO = 'novapace.info';
+// Zeichen pro Storage.write-Zeile bei der Installation; jede wird quittiert,
+// bevor die nächste geht — der Eingangspuffer der Konsole ist klein.
+const BANGLE_CHUNK = 240;
+// Doppelimpuls am Handgelenk, damit er sich vom Clip am Fuß unterscheidet.
+const ARM_BUZZ_MS = 150;
+// Das Messfenster ist der letzte Doppelschritt DESSELBEN Clips, also ein
+// ganzer Armschwung vor und zurück. Kürzer ist kein echter Schritt, länger
+// lag eine Pause dazwischen: dann wird nicht gemessen.
+const STRIDE_MIN_MS = 600;
+const STRIDE_MAX_MS = 2500;
+// Ein Schritt, der erst so spät fertig wird (Aufnahme-Ende, fehlende
+// 'P'-Frames), liegt nicht mehr im Fenster der Uhr — kein Wert, kein Reiz.
+const STEP_LATE_MS = 1500;
+// Feldstärke relativ zur Kalibrierung; außerhalb verbiegt Eisen das Feld,
+// der Winkel daraus ist keiner. Dieselben Grenzen wie auf der Uhr.
+const FIELD_OK_LO = 0.65, FIELD_OK_HI = 1.35;
+const ARM_MIN = 0, ARM_MAX = 90;
+const ARM_STORE_KEY = 'novapace.it.arm';
+
+// Was die Uhr zeigt: oben der Grund, unten was zu tun ist. Liegt ein Schritt
+// unter mehreren Schwellen, stehen nur die Gründe da, untereinander.
+const CUE_TEXT = [
+  { bit: F.BELOW_LEN,   text: ['Schritt zu kurz',          'Größere Schritte machen'] },
+  { bit: F.BELOW_FLEX,  text: ['Auftrittswinkel zu klein', 'Mit der Ferse aufsetzen'] },
+  { bit: F.BELOW_RANGE, text: ['Winkelumfang zu klein',    'Fuß anheben und abrollen'] },
+];
+const ARM_TEXT = ['Armschwung zu gering', 'Arme mitschwingen'];
+
+state.bangle = null;
+state.arm = { on: 0, v: 20 };
+state.armLast = null;
+try {
+  const s = JSON.parse(localStorage.getItem(ARM_STORE_KEY));
+  if (s && s.v >= ARM_MIN && s.v <= ARM_MAX) state.arm = { on: s.on ? 1 : 0, v: Math.round(s.v) };
+} catch (e) { /* ohne Speicher: aus */ }
+const saveArm = () => { try { localStorage.setItem(ARM_STORE_KEY, JSON.stringify(state.arm)); } catch (e) {} };
+
+// JS-Stringliteral in reinem ASCII: die Konsole der Uhr liest Bytes, ein
+// UTF-8-Umlaut käme dort als zwei Zeichen an, ü als eins.
+const jsStr = s => JSON.stringify(s)
+  .replace(/[\u007f-￿]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+
+// Die Uhr-App, wie sie gesendet wird: ohne ganzzeilige Kommentare und
+// Einrückung.
+function bangleAppCode() {
+  return $('bangleApp').textContent.split('\n')
+    .map(l => l.trim()).filter(l => l && !l.startsWith('//')).join('\n');
+}
+// FNV-1a über den gesendeten Code, als Versionskennung: jede Änderung am
+// Block führt beim nächsten Verbinden zur Neuinstallation, ohne Nummer, die
+// jemand hochzählen müsste.
+function fnv1a(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16).padStart(8, '0');
+}
+const BANGLE_CODE = bangleAppCode();
+const BANGLE_HASH = fnv1a(BANGLE_CODE);
+
+// 20-Byte-Stücke, nacheinander und quittiert: mehr trägt ein Write beim
+// Standard-MTU nicht, und Web Bluetooth verträgt keine zwei gleichzeitigen
+// GATT-Operationen auf einem Gerät. Die Kette hält die Reihenfolge.
+function bangleWrite(w, text) {
+  const data = new TextEncoder().encode(text);
+  const run = async () => { for (let i = 0; i < data.length; i += 20) await w.rx.writeValue(data.slice(i, i + 20)); };
+  w.chain = w.chain.then(run, run);
+  return w.chain.catch(e => console.warn('[bangle write]', e.message));
+}
+// \x10 am Zeilenanfang schaltet das Konsolen-Echo für diese Zeile ab. Läuft
+// die App nicht (am Knopf verlassen), antwortet die Uhr "gone", und
+// onBangleMsg() startet sie neu.
+const guard = js => '\x10if(global.NP){' + js + '}else{Bluetooth.println(\'NP:{"t":"gone"}\')}\n';
+const bangleCall = (w, js) => bangleWrite(w, guard(js));
+
+// Zeile senden und auf die erste Antwort vom Typ `type` warten (null nach ms).
+function bangleAsk(w, line, type, ms) {
+  return new Promise(resolve => {
+    const waiter = { type, resolve };
+    waiter.timer = setTimeout(() => { w.waiters = w.waiters.filter(x => x !== waiter); resolve(null); }, ms);
+    w.waiters.push(waiter);
+    bangleWrite(w, line);
+  });
+}
+
+function onBangleData(w, ev) {
+  w.buf += new TextDecoder().decode(ev.target.value);
+  let nl;
+  while ((nl = w.buf.indexOf('\n')) >= 0) {
+    const line = w.buf.slice(0, nl);
+    w.buf = w.buf.slice(nl + 1);
+    // Die Konsole stellt gelegentlich ihr ">" davor: gesucht wird das Präfix.
+    const at = line.indexOf('NP:');
+    if (at < 0) continue;
+    let msg;
+    try { msg = JSON.parse(line.slice(at + 3)); } catch (e) { continue; }
+    const i = w.waiters.findIndex(x => x.type === msg.t);
+    if (i >= 0) { const [x] = w.waiters.splice(i, 1); clearTimeout(x.timer); x.resolve(msg); }
+    onBangleMsg(w, msg);
+  }
+  if (w.buf.length > 2000) w.buf = '';
+}
+
+function onBangleMsg(w, msg) {
+  if (msg.t === 'ready') {
+    w.ready = msg.h === BANGLE_HASH;
+    w.cal = !!msg.cal;
+    w.launching = false;
+    pushBangleCfg();
+    renderWatch();
+  } else if (msg.t === 'gone' && w.ready && !w.launching) {
+    w.ready = false;
+    renderWatch();
+    launchBangleApp(w).catch(e => { w.error = e.message; renderWatch(); });
+  } else if (msg.t === 'cal') {
+    w.calibrating = false;
+    if (msg.ok) w.cal = true;
+    w.calResult = msg.ok ? 'ok' : 'fail';
+    renderWatch();
+  }
+}
+
+async function installBangleApp(w) {
+  const file = `var NP_H=${jsStr(BANGLE_HASH)};\n` + BANGLE_CODE;
+  const total = file.length;
+  const wrote = () => 'Bluetooth.println(\'NP:{"t":"w"}\')\n';
+  for (let off = 0; off < total; off += BANGLE_CHUNK) {
+    w.progress = Math.round(off / total * 100);
+    renderWatch();
+    const part = file.slice(off, off + BANGLE_CHUNK);
+    const ack = await bangleAsk(w,
+      `\x10require("Storage").write(${jsStr(BANGLE_FILE)},${jsStr(part)},${off},${total});` + wrote(), 'w', 5000);
+    if (!ack) throw new Error('Uhr hat einen Teil der Installation nicht bestätigt');
+  }
+  const info = { id: 'novapace', name: 'novapace', src: BANGLE_FILE, type: 'app', h: BANGLE_HASH };
+  const ack = await bangleAsk(w,
+    `\x10require("Storage").writeJSON(${jsStr(BANGLE_INFO)},${JSON.stringify(info)});` + wrote(), 'w', 5000);
+  if (!ack) throw new Error('Uhr hat die Installation nicht bestätigt');
+  w.progress = null;
+}
+
+// load() setzt die Uhr zurück und startet die App; die Verbindung bleibt
+// stehen. Die App meldet sich mit "ready".
+async function launchBangleApp(w) {
+  w.launching = true;
+  renderWatch();
+  const ready = await bangleAsk(w, `\x10load(${jsStr(BANGLE_FILE)})\n`, 'ready', 10000);
+  w.launching = false;
+  if (!ready) throw new Error('Uhr-App startet nicht');
+  renderWatch();
+}
+
+// Läuft schon genau diese App? Sonst installieren (falls die gespeicherte
+// eine andere ist) und starten.
+async function ensureBangleApp(w) {
+  const hi = await bangleAsk(w,
+    '\x10Bluetooth.println("NP:"+JSON.stringify({t:"hi",run:global.NP?NP.h:"",'
+    + `inst:(require("Storage").readJSON(${jsStr(BANGLE_INFO)},1)||{}).h||""}))\n`, 'hi', 4000);
+  if (!hi) throw new Error('Uhr antwortet nicht');
+  if (hi.run === BANGLE_HASH) {
+    const st = await bangleAsk(w, '\x10NP.hi()\n', 'hi', 3000);
+    w.ready = true;
+    w.cal = !!st?.cal;
+    pushBangleCfg();
+    renderWatch();
+    return;
+  }
+  if (hi.inst !== BANGLE_HASH) await installBangleApp(w);
+  await launchBangleApp(w);
+}
+
+async function connectBangle() {
+  if (!navigator.bluetooth) { setStatus('Web Bluetooth nicht verfügbar (Chrome benutzen)', 'bad'); return; }
+  let w = null;
+  try {
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'Bangle.js' }], optionalServices: [NUS_SERVICE] });
+    setStatus(`verbinde mit ${device.name}…`);
+    const server  = await device.gatt.connect();
+    const service = await server.getPrimaryService(NUS_SERVICE);
+    w = { device, buf: '', chain: Promise.resolve(), waiters: [],
+          rx: await service.getCharacteristic(NUS_RX),
+          ready: false, cal: false, launching: false, calibrating: false,
+          progress: null, calResult: null, error: null, disturbed: false };
+    const tx = await service.getCharacteristic(NUS_TX);
+    await tx.startNotifications();
+    tx.addEventListener('characteristicvaluechanged', ev => onBangleData(w, ev));
+    device.addEventListener('gattserverdisconnected', () => onBangleDisconnected(w));
+    state.bangle = w;
+    renderConnStatus();
+    renderWatch();
+    await ensureBangleApp(w);
+  } catch (e) {
+    if (w && state.bangle === w) {
+      // Verbunden, aber die App kam nicht hoch: stehen lassen und sagen.
+      w.error = e.message; w.progress = null; renderWatch(); return;
+    }
+    const [msg, cls] = bleErrorText(e);
+    if (!cls) { renderConnStatus(); return; }
+    setStatus(msg, cls);
+  }
+}
+
+function onBangleDisconnected(w) {
+  if (state.bangle !== w) return;
+  for (const x of w.waiters) { clearTimeout(x.timer); x.resolve(null); }
+  state.bangle = null;
+  renderWatch();
+}
+function disconnectBangle() {
+  const w = state.bangle;
+  if (!w) return;
+  if (w.device.gatt.connected) w.device.gatt.disconnect(); else onBangleDisconnected(w);
+}
+
+const bangleUsable = () => state.bangle?.ready ? state.bangle : null;
+function pushBangleCfg() {
+  const w = bangleUsable();
+  if (w) bangleCall(w, `NP.cfg({thr:${state.arm.on ? state.arm.v : 0}})`);
+}
+const pushArmCfg = debounce(pushBangleCfg, 300);
+
+function bangleCue(w, title, sub, buzzMs) {
+  const strength = Math.min(1, Math.max(0.1, state.intensity / 10));
+  bangleCall(w, `NP.cue(${jsStr(title)},${jsStr(sub)},${buzzMs},${strength})`);
+}
+
+// Ausgenommen wie beim Clip: der Clip hat für genau diesen Schritt
+// entschieden, und dieselbe Entscheidung gilt für den Arm. Dazu jede laufende
+// Treppen-Sperre, auch die des anderen Fußes — ein Reiz auf der Treppe ist
+// die eine Lage, in der ein unerwarteter Impuls jemanden zu Fall bringt.
+const armEligible = s => !(s.flags & (F.CURVE | F.STAIRS | F.EXCLUDED | F.LOCKOUT))
+                      && !state.clips.some(c => c.lockout);
+
+async function bangleOnStep(clip, step, strideMs) {
+  const w = bangleUsable();
+  if (!w || Date.now() - step.t1 > STEP_LATE_MS) return;
+
+  const reasons = step.flags & F.VIBRATE ? CUE_TEXT.filter(c => step.flags & c.bit).map(c => c.text) : [];
+  let armCue = false;
+  if (w.cal && strideMs >= STRIDE_MIN_MS && strideMs <= STRIDE_MAX_MS) {
+    const r = await bangleAsk(w, guard(`NP.s(${Math.round(strideMs)})`), 's', 1500);
+    if (r?.why === 'cal') { w.cal = false; renderWatch(); }
+    else if (r && r.a != null) {
+      w.disturbed = !(r.f > FIELD_OK_LO && r.f < FIELD_OK_HI);
+      if (!w.disturbed) {
+        step.arm = r.a;
+        state.armLast = r.a;
+        armCue = state.arm.on && r.a < state.arm.v && armEligible(step);
+        if (armCue) step.armCue = true;
+        renderFeed();
+      }
+      renderArmRead();
+    }
+  }
+  if (armCue) reasons.push(ARM_TEXT);
+  if (!reasons.length || state.bangle !== w) return;
+  if (reasons.length === 1) bangleCue(w, reasons[0][0], reasons[0][1], armCue ? ARM_BUZZ_MS : 0);
+  else bangleCue(w, reasons.map(r => r[0]), '', armCue ? ARM_BUZZ_MS : 0);
+}
+
+function renderArm() {
+  $('armVal').textContent = state.arm.v + '°';
+  $('armIn').value = state.arm.v;
+  $('armSw').setAttribute('aria-checked', state.arm.on ? 'true' : 'false');
+  $('armState').textContent = state.arm.on ? 'an' : 'aus';
+  $('armState').classList.toggle('on', !!state.arm.on);
+  renderStats();
+}
+
+// Median und 10-%-Wert wie bei den drei Clip-Schwellen — aus den Schritten
+// der Aufnahme, für die die Uhr einen Wert hatte.
+function renderArmStat(steps) {
+  const el = $('armStat');
+  const vals = steps.map(s => s.arm).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!steps.length) { el.innerHTML = '<span>Keine Aufnahme geladen — Statistik erscheint nach einer Aufnahme mit Uhr.</span>'; return; }
+  if (!vals.length) { el.innerHTML = '<span>Diese Aufnahme enthält keine Armschwung-Werte (ohne Uhr aufgenommen).</span>'; return; }
+  const med = quantile(vals, 0.5);
+  const sugg = Math.min(ARM_MAX, Math.max(ARM_MIN, Math.round(quantile(vals, 0.1))));
+  el.innerHTML = `<span>Aufnahme: Median ${Math.round(med)}° · 10-%-Wert ${sugg}° (${vals.length} Schritte)</span>`
+    + `<button id="armSugg" data-v="${sugg}">10-%-Wert übernehmen</button>`;
+  $('armSugg').addEventListener('click', e => {
+    state.arm = { on: 1, v: +e.target.dataset.v };
+    saveArm(); renderArm(); pushArmCfg();
+  });
+}
+
+function renderArmRead() {
+  const w = state.bangle;
+  let t;
+  if (!w)                 t = 'Keine Uhr verbunden — die Armschwelle wirkt nur mit verbundener Uhr.';
+  else if (w.calibrating) t = 'Kalibrieren: Uhr 20 s langsam in alle Richtungen drehen.';
+  else if (!w.ready)      t = 'Uhr-App wird gestartet…';
+  else if (!w.cal)        t = 'Uhr nicht kalibriert — ohne Kalibrierung wird nicht gemessen.';
+  else if (w.disturbed)   t = 'Magnetfeld gestört (Eisen in der Nähe?) — Messung verworfen.';
+  else if (state.armLast == null) t = 'Armschwung: noch kein Schritt gemessen.';
+  else                    t = `Armschwung zuletzt: ${num(state.armLast, 0)}°`;
+  if (w?.calResult === 'fail' && !w.calibrating) t += ' Letzte Kalibrierung fehlgeschlagen.';
+  $('armRead').textContent = t;
+  $('armCalBtn').disabled = !w?.ready || w.calibrating;
+}
+
+function renderWatch() {
+  const box = $('watchRow');
+  const w = state.bangle;
+  box.innerHTML = '';
+  if (!w) {
+    const b = document.createElement('button');
+    b.className = 'secondary';
+    b.textContent = 'Uhr verbinden';
+    b.onclick = connectBangle;
+    box.appendChild(b);
+  } else {
+    const el = document.createElement('span');
+    el.className = 'chip';
+    el.innerHTML = '<span class="dot L"></span>Uhr';
+    const x = document.createElement('button');
+    x.textContent = '✕';
+    x.setAttribute('aria-label', 'Uhr trennen');
+    x.onclick = disconnectBangle;
+    el.appendChild(x);
+    box.appendChild(el);
+    const hint = w.error ? `Uhr: ${w.error}. Trennen und neu verbinden.`
+      : w.progress != null ? `Uhr-App wird installiert… ${w.progress} %`
+      : !w.ready ? 'Uhr-App wird gestartet…'
+      : !w.cal ? 'Uhr nicht kalibriert — „Uhr kalibrieren“ unter „Feedback anpassen“.' : '';
+    if (hint) {
+      const h = document.createElement('span');
+      h.className = 'hint';
+      h.textContent = hint;
+      box.appendChild(h);
+    }
+  }
+  renderArmRead();
+}
+
+function wireArm() {
+  $('armSw').addEventListener('click', () => {
+    state.arm.on = state.arm.on ? 0 : 1;
+    saveArm(); renderArm(); pushArmCfg();
+  });
+  $('armIn').addEventListener('input', e => {
+    state.arm.v = +e.target.value;
+    saveArm(); renderArm(); pushArmCfg();
+  });
+  wireNudges($('armThr'));
+  // Das Ergebnis meldet die Uhr nach 20 s selbst ("cal"); der Zeitgeber fängt
+  // nur den Fall ab, dass die Meldung nie kommt.
+  $('armCalBtn').addEventListener('click', () => {
+    const w = bangleUsable();
+    if (!w || w.calibrating) return;
+    w.calibrating = true;
+    w.calResult = null;
+    renderWatch();
+    bangleCall(w, 'NP.cal()');
+    setTimeout(() => { if (w.calibrating) { w.calibrating = false; renderWatch(); } }, 30000);
+  });
 }
 
 // =====================================================================
@@ -1333,6 +2065,7 @@ $('intensity').addEventListener('input', e => {
   pushIntensity(state.intensity);
 });
 $('pulseBtn').addEventListener('click', () => broadcast('P'));
+wireArm();
 wireNudges(document.querySelector('#fbCard > .thr'));
 window.addEventListener('resize', () => draw());
 
@@ -1345,6 +2078,8 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
 
 renderAll();
 renderFeed();
+renderWatch();
+renderArm();
 draw();
 </script>
 </body>
