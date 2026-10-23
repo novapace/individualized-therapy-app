@@ -466,26 +466,82 @@ function calEnd() {
     count = 0;
   }
   out({ t: "cal", ok: ok, r: Math.round(round * 100) / 100, n: c.n });
-  showCue(ok ? "Kalibriert" : "Nicht kalibriert",
-          ok ? "" : "Noch einmal, Uhr in alle Richtungen drehen", 0, 0);
+  showCue({ t: ok ? "Kalibriert" : "Nicht kalibriert" },
+          ok ? "" : "Noch einmal, Uhr in alle Richtungen drehen", 0);
 }
 
-function showCue(title, sub, buzz, strength) {
-  ui.cue = { title: title, sub: sub || "" };
+// Reiz am Handgelenk: BUZZ_COUNT Impulse zu je buzz ms, immer mit voller
+// Staerke. Die Uhr kann nicht lauter als 1, und sie hat keinen
+// Lautsprecher -- Bangle.beep() faehrt auf der Bangle.js 2 denselben Motor.
+// Mehr Wirkung gibt es nur ueber Dauer und Anzahl.
+var BUZZ_COUNT = 2, BUZZ_GAP_MS = 150;
+
+// items: Liste von { t: Grund, v: Istwert, z: Zielwert } -- ein Schritt kann
+// unter mehreren Schwellen liegen. sub: was zu tun ist (nur bei einem Grund).
+function showCue(items, sub, buzz) {
+  ui.cue = { items: [].concat(items), sub: sub || "" };
   Bangle.setLCDPower(1);
   draw();
   if (buzz > 0) {
-    // Doppelimpuls: am Handgelenk anders zu spueren als der Clip am Fuss.
-    quietUntil = getTime() + (2 * buzz + 120) / 1000 + BUZZ_QUIET_S;
-    Bangle.buzz(buzz, strength).then(function () {
-      setTimeout(function () { Bangle.buzz(buzz, strength); }, 120);
-    });
+    quietUntil = getTime() + (BUZZ_COUNT * (buzz + BUZZ_GAP_MS)) / 1000 + BUZZ_QUIET_S;
+    var n = 0;
+    var pulse = function () {
+      Bangle.buzz(buzz, 1).then(function () {
+        if (++n < BUZZ_COUNT) setTimeout(pulse, BUZZ_GAP_MS);
+      });
+    };
+    pulse();
   }
   if (ui.cueTimer) clearTimeout(ui.cueTimer);
   ui.cueTimer = setTimeout(function () { ui.cue = null; ui.cueTimer = 0; draw(); }, CUE_MS);
 }
 
+// Zeilenumbruch mit Silbentrennung. g.wrapString() bricht ein zu langes Wort
+// an der Stelle, an der der Platz ausgeht ("Schrittlaen / ge"). Hier wird
+// nur an Trennstellen getrennt: weiche Trennstriche (\xAD), die das Telefon
+// in die Texte setzt, und vorhandene Bindestriche. Erst wenn auch der
+// kleinste Teil nicht passt, wird hart getrennt. \xA0 (geschuetztes
+// Leerzeichen) haelt Woerter zusammen, "90 cm" etwa, und wird als normales
+// Leerzeichen gezeichnet.
+function wrap(text, w) {
+  var out = [], line = "", words = String(text).split(" "), i, word, p, head, rest, cand, k;
+  var plain = function (s) { return s.split("\xAD").join("").split("\xA0").join(" "); };
+  var fits = function (s) { return g.stringWidth(s) <= w; };
+  for (i = 0; i < words.length; i++) {
+    word = words[i];
+    while (word.length) {
+      cand = line ? line + " " + plain(word) : plain(word);
+      if (fits(cand)) { line = cand; break; }
+      // Laengster Kopf bis zu einer Trennstelle, der noch auf die Zeile passt.
+      head = null;
+      for (p = word.length - 1; p > 0; p--) {
+        if (word[p] == "\xAD") { head = word.substr(0, p) + "-"; rest = word.substr(p + 1); }
+        else if (word[p - 1] == "-") { head = word.substr(0, p); rest = word.substr(p); }
+        else continue;
+        cand = line ? line + " " + plain(head) : plain(head);
+        if (fits(cand)) break;
+        head = null;
+      }
+      if (head != null) { out.push(cand); line = ""; word = rest; continue; }
+      if (line) { out.push(line); line = ""; continue; }
+      // Nicht einmal ein Teil passt auf eine leere Zeile: hart trennen.
+      word = plain(word);
+      for (k = word.length - 1; k > 1 && !fits(word.substr(0, k)); k--);
+      out.push(word.substr(0, k));
+      word = word.substr(k);
+    }
+  }
+  if (line) out.push(line);
+  return out;
+}
+
+// Das novapace-Logo, 2 bpp: 1 = Fuesse (gruen), 2 = Schriftzug (cyan, die
+// naechste Farbe zum Petrol des Logos auf dem 8-Farben-Display).
+var LOGO = { width: 100, height: 104, bpp: 2, transparent: 0,
+  buffer: atob("AAAAAAAVVVVVVVVVVVVVVVQAAAAAAAAAAAAAAAAAFVVVVVVVVVVVVVVUAAAAAAAAAAAAAAAAABVVVVVVVVVVVVVVVAAAAAAAAAAAAAAAAABVVVVVVVVVVVVVVVAAAAAAAAAAAAAAAAAAVVVVVVVVVVVVVVVQAAAAAAAAAAAAAAAAAFVVVVVVVVVVVVVVUAAAAAAAAAAAAAAAAABVVVVVVVVVVVVVVVAAAAAAAAAAAAAAAAAAVVVVVVVVVVVVVVVQAAAAAAAAAAAAAAAAAFVVVVVVVVVVVVVVUAAAAAAAAAAAAAAAAAFVVVVVVVVVVVVVVVAAAAAAAAAAAAAAAAABVVVVVVVVVVVVVVVAAAAAAAAAAAAAAAAAAVVVVVVVVVVVVVVVQAAAAAAAAAAAAAAAAAFVVVVVVVVVVVVVVUAAAAAAAAAAAAAAAAAFVVVVVVVVVVVVVVVAAAAAAAAAAAAAAAAABVVVVVVVVVVVVVVVQAAAAAAAAAAAAAAAAAVVVVVVVVVVVVVVVUAAAAAAAAAAAAAAAAAVVVVVVVVUVVVVVVVAAAAAAAAAAAAAAAAAFVVVVVVVUFVVVVVVQAAAAAAAAAAAAAAAABVVVVVVVUBVVVVVVUAAAAAAAAAAAAAAAABVVVVVVVVAVVVVVVUAAAAAAAAAAAAAAAAAVVVVVVVVAFVVVVVVAAAAAAAAAAAAAAAAAVVVVVVVVABVVVVVVQAAAAAAAAAAAAAAAAFVVVVVVVAAVVVVVVUAAAAAAAAAAAAAAAAFVVVVVVVQAFVVVVVVAAAAAAAAAAAAAAAABVVVVVVVQABVVVVVVQAAAAAAAAAAAAAAABVVVVVVVUAAVVVVVVUAAAAAAAAAAAAAAABVVVVVVVUAAFVVVVVVAAAAAAAAAAAAAAABVVVVVVVUAABVVVVVVQAAAAAAAAAAAAAABVVVVVVVVAAAVVVVVVUAAAAAAAAAAAAAABVVVVVVVVQAAFVVVVVVAAAAAAAAAAAAAABVVVVVVVVQAABVVVVVVQAAAAAAAAAAAAABVVVVVVVVUAAAVVVVVVUAAAAAAAAAAAAABVVVVVVVVUAAAFVVVVVVAAAAAAAAAAAAAFVVVVVVVVVAAABVVVVVVQAAAAAAAAAAAAFVAVVVVVVVQAAAVVVVVVUAAAAAAAAAAAAFVABVVVVVVQAAAFVVVVVVAAAAAAAAAAAAFVAAVVVVVVUAAABVVVVVVQAAAAAAAAAAABVQAFVVVVVVAAAAVVVVVVUAAAAAAAAAAABVQAAVVVVVVQAAAVVVVVVVAAAAAAAAAAAAVQAAFVVVVVQAAAFVVVVVVQAAAAAAAAAAAFUAABVVVVVUAAABVVVVVVUAAAAAAAAAAABVAAAVVVVVVAAAAVVVVVVVAAAAAAAAAAAAVAAAFVVVVVQAAAFVVVVVVQAAAAAAAAAAAFQAABVVVVVUAAABVVVVVVVAAAAAAAAAAAAUAAAVVVVVVAAABVVVVVVVUAAAAAAAAAAAFQAAFVVVVVQAAAVVVVVVVVUAAAAAAAAAAAUAAAVVVVVUAAAFVVVVVVVVUAAAAAAAAAABAAAFVVVVVAAABVVVVVVVVVUAAAAAAAAAAUAABVVVVVQAAAVABVVVVVVVUAAAAAAAAABQAAVVVVVUAAAVAAAVVVVVVVUAAAAAAAAAFAAFVVVVVAAAFQAAAVVVVVVVUAAAAAAAAAUABVVVVVUAABUAAAAVVVVVVVUAAAAAAAAFQAFVVVVVAAAVAAAAAVVVVVVVUAAAAAAAAVABVVVVVQAAFQAAAAAVVVVVVVUAAAAAAABUAVVVVVVAABUAAAAAAVVVVVVVVAAAAAAAVABVVVVVQAAVAAAAAAAVVVVVVVVAAAAAABUAVVVVVUAAFUAAAAAAAFVVVVVVVUBUAAAVAFVVVVVAAAVAAAAAAAAAVVVVVVVVVQAABQAVVVVVQAABUAAAAAAAAABVVVVVVVUAAAVAFVVVVVAAAFVVVVVQAAAAABVVVVVVAAABQBVVVVVQAAAFVVVVVVVUAAAAFVVVVQAAAUAVVVVVUAAAAAAAAAAFVVVAAAFVVVQAAAFQBVVVVVQAAAAAAAAAAAABVVVVVVVAAAAAUAVVVVVUAAAAAAAAAAAAAAAAAAAAAAAAAFAFVVVVVQAAAAAAAAAAAAAAAAAAAAAAAABUAVVVVVVAAAAAAAAAAAAAAAAAAAAAAAAAFAFVVVVVUAAAAAAAAAAAAAAAAAAAAAAAABQAVVVVVVQAAAAAAAAAAAAAAAAAAAAAAAAFABVVVVVVQAAAAAAAAAAAAAAAAAAAAAAABQAFVVVVVVQUAAAAAAAAAAAAAAAAAAAAAAFAAVVVVVVVVQAAAAAAAAAAAAAAAAAAAAAAUAAVVVVVVVUAAAAAAAAAAAAAAAAAAAAAAFQAAFVVVVVVAAAAAAAAAAAAAAAAAAAAAAAVQAABVVVVVQAAAAAAAAAAAAAAAAAAAAAAAVVQAVVVVVUAAAAAAAAAAAAAAAAAAAAAAABVVVVVVVVUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACqqgACqoCgAAoKqoAAqqoACqqAAKqgAKqgqoqACqKoKAAKKoqgAqqqgCqqoAqqqAKqqKgAoCoAKCgAKCgAqAKoCqAqAqgKgKoKoCqgAKAoAAoqACgoACgCoAKgKACoKgAqCoAKoACgoAAKCgCoAAAoAqAAqAAAKCoACioACqAAoKAACgoAoAAAKAKgAKgAqqgqAAAqqqqgAKCgAAICgKAKqqgCoACoCqqoKAAAKqqqoACgoAAKAoKAKoAoAqAAqCqqqCgAACoAAKAAoKAACgKCgKgAKAKgAKioACgqAAAqAACgAKCgAAoAooCgACgCoACoqACoKgAKKgAAoACgKAAqAKoAoACoAqgCoKgAqAqAKgqACqAAoCoAqAAqAKgCqAKqCqCqKqgKoKoKqKqgAKAKqqAAKAAqqqgCqqqAKqqoAqqoAqqqgAAgAKqAAAgACqgIAqKqAAqoKACqgAAqoAAAAAAAAAAAAAAAAAKgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKgAAAAAAAAAAAAAAA=") };
+
 function two(v) { return ("0" + v).substr(-2); }
+function nb(s) { return String(s).split(" ").join("\xA0"); }
 
 function draw() {
   var W = g.getWidth(), H = g.getHeight();
@@ -499,33 +555,50 @@ function draw() {
   if (ui.cue) {
     // Schwarz auf Gelb: die eine Farbkombination, die auf dem
     // reflektierenden Display auch in der Sonne traegt.
-    g.setBgColor(1, 1, 0).clearRect(0, 0, W - 1, H - 1).setColor(0, 0, 0);
-    // title ist ein String oder eine Liste von Gruenden (ein Schritt kann
-    // unter mehreren Schwellen liegen). Die groesste Schrift, die passt.
-    var room = ui.cue.sub ? H * 0.62 : H - 8, sizes = [28, 22, 18], lines, k, j;
-    for (k = 0; k < sizes.length; k++) {
-      g.setFont("Vector", sizes[k]);
-      lines = [];
-      var parts = [].concat(ui.cue.title);
-      for (j = 0; j < parts.length; j++) lines = lines.concat(g.wrapString(parts[j], W - 12));
-      if (lines.length * sizes[k] * 1.1 <= room) break;
+    g.setBgColor(1, 1, 0).clearRect(0, 0, W - 1, H - 1).setColor(0, 0, 0).setFontAlign(0, -1);
+    // Bloecke: je Grund der Titel und darunter Ist/Ziel, am Ende der Hinweis.
+    // Die groesste Schrift, bei der alles auf den Schirm passt.
+    var blocks = [], j, k, it, sizes = [28, 24, 20, 18, 16, 14], f, total, laid;
+    for (j = 0; j < ui.cue.items.length; j++) {
+      it = ui.cue.items[j];
+      blocks.push({ s: 1, x: it.t });
+      // Zwei untrennbare Haelften, "Ist 90 cm," und "Ziel 100 cm": umbrochen
+      // wird nur zwischen ihnen, nie mitten in einem Wert.
+      if (it.v != null) blocks.push({ s: 0.75, x: nb("Ist " + it.v + ",") + " " + nb("Ziel " + it.z) });
     }
-    g.drawString(lines.join("\n"), W / 2, ui.cue.sub ? H * 0.36 : H / 2);
-    if (ui.cue.sub) {
-      g.setFont("Vector", 20);
-      g.drawString(g.wrapString(ui.cue.sub, W - 12).join("\n"), W / 2, H * 0.78);
+    if (ui.cue.sub) blocks.push({ s: 0.75, x: ui.cue.sub });
+    for (k = 0; k < sizes.length; k++) {
+      laid = []; total = 0;
+      for (j = 0; j < blocks.length; j++) {
+        f = Math.max(12, Math.round(sizes[k] * blocks[j].s));
+        g.setFont("Vector", f);
+        var ls = wrap(blocks[j].x, W - 10);
+        laid.push({ f: f, ls: ls, gap: j ? (blocks[j].s == 1 ? 10 : 4) : 0 });
+        total += laid[j].gap + ls.length * f * 1.08;
+      }
+      if (total <= H - 8) break;
+    }
+    var y = Math.max(4, (H - total) / 2);
+    for (j = 0; j < laid.length; j++) {
+      y += laid[j].gap;
+      g.setFont("Vector", laid[j].f);
+      for (k = 0; k < laid[j].ls.length; k++) {
+        g.drawString(laid[j].ls[k], W / 2, y);
+        y += laid[j].f * 1.08;
+      }
     }
     return;
   }
   var d = new Date();
-  g.setFont("Vector", 30).drawString(two(d.getHours()) + ":" + two(d.getMinutes()), W / 2, 22);
-  g.setFont("Vector", 20).drawString("Armschwung", W / 2, 62);
-  g.setFont("Vector", 50).drawString(ui.sway == null ? "--" : Math.round(ui.sway) + "\xB0", W / 2, 104);
+  g.setFont("Vector", 30).drawString(two(d.getHours()) + ":" + two(d.getMinutes()), W / 2, 20);
+  LOGO.palette = new Uint16Array([0, g.toColor(0, 1, 0), g.toColor(0, 1, 1), 0]);
+  g.drawImage(LOGO, (W - LOGO.width) / 2, 40);
   var foot = !cal ? "nicht kalibriert"
            : !ui.linked ? "Telefon getrennt"
-           : ui.thr > 0 ? "Ziel: ab " + ui.thr + "\xB0" : "";
-  if (!cal || !ui.linked) g.setColor(1, 1, 0);
-  g.setFont("Vector", 18).drawString(foot, W / 2, 152);
+           : ui.sway == null ? ""
+           : "Arm " + Math.round(ui.sway) + "\xB0" + (ui.thr > 0 ? " \xB7 Ziel " + ui.thr + "\xB0" : "");
+  if (!cal || !ui.linked) g.setColor(1, 1, 0); else g.setColor(1, 1, 1);
+  g.setFont("Vector", 18).drawString(foot, W / 2, 160);
 }
 
 // Uhrzeit zur vollen Minute nachziehen.
@@ -549,7 +622,7 @@ var NP = {
     }
     out(r);
   },
-  cue: function (title, sub, buzz, strength) { if (!calRun) showCue(title, sub, buzz, strength); },
+  cue: function (items, sub, buzz) { if (!calRun) showCue(items, sub, buzz); },
   cfg: function (o) { ui.thr = o.thr || 0; if (!ui.cue && !calRun) draw(); },
   cal: function () { calStart(); }
 };
@@ -1619,8 +1692,11 @@ const BANGLE_INFO = 'novapace.info';
 // Zeichen pro Storage.write-Zeile bei der Installation; jede wird quittiert,
 // bevor die nächste geht — der Eingangspuffer der Konsole ist klein.
 const BANGLE_CHUNK = 240;
-// Doppelimpuls am Handgelenk, damit er sich vom Clip am Fuß unterscheidet.
-const ARM_BUZZ_MS = 150;
+// Länge jedes der zwei Impulse am Handgelenk (BUZZ_COUNT auf der Uhr), immer
+// mit voller Stärke: lauter kann der Motor nicht, und einen Lautsprecher hat
+// die Bangle.js 2 nicht. Zwei lange Impulse unterscheiden sich außerdem
+// deutlich vom kurzen Clip-Impuls am Fuß (≤ 125 ms).
+const ARM_BUZZ_MS = 400;
 // Das Messfenster ist der letzte Doppelschritt DESSELBEN Clips, also ein
 // ganzer Armschwung vor und zurück. Kürzer ist kein echter Schritt, länger
 // lag eine Pause dazwischen: dann wird nicht gemessen.
@@ -1635,14 +1711,21 @@ const FIELD_OK_LO = 0.65, FIELD_OK_HI = 1.35;
 const ARM_MIN = 0, ARM_MAX = 90;
 const ARM_STORE_KEY = 'novapace.it.arm';
 
-// Was die Uhr zeigt: oben der Grund, unten was zu tun ist. Liegt ein Schritt
-// unter mehreren Schwellen, stehen nur die Gründe da, untereinander.
+// Was die Uhr zeigt: der Grund, darunter Ist- und Zielwert, und bei einem
+// einzigen Grund, was zu tun ist. ­ ist ein weicher Trennstrich: dort,
+// und nur dort, darf die Uhr ein zu langes Wort umbrechen ("Schritt-" /
+// "länge zu kurz" statt "Schrittlän" / "ge zu kurz", wrap() auf der Uhr).
+const SHY = '­';
+const deg = v => Math.round(v) + '°';
 const CUE_TEXT = [
-  { bit: F.BELOW_LEN,   text: ['Schritt zu kurz',          'Größere Schritte machen'] },
-  { bit: F.BELOW_FLEX,  text: ['Auftrittswinkel zu klein', 'Mit der Ferse aufsetzen'] },
-  { bit: F.BELOW_RANGE, text: ['Winkelumfang zu klein',    'Fuß anheben und abrollen'] },
+  { bit: F.BELOW_LEN, key: 'L', t: `Schritt${SHY}länge zu kurz`, sub: 'Größere Schritte machen',
+    v: s => Math.round(s.len * 100) + ' cm', z: v => v + ' cm' },
+  { bit: F.BELOW_FLEX, key: 'F', t: `Auftritts${SHY}winkel zu klein`, sub: 'Mit der Ferse aufsetzen',
+    v: s => deg(s.maxflex), z: deg },
+  { bit: F.BELOW_RANGE, key: 'R', t: `Winkel${SHY}umfang zu klein`, sub: 'Fuß anheben und abrollen',
+    v: s => deg(s.range), z: deg },
 ];
-const ARM_TEXT = ['Armschwung zu gering', 'Arme mitschwingen'];
+const ARM_TEXT = { t: `Arm${SHY}schwung zu gering`, sub: 'Arme mitschwingen', v: s => deg(s.arm), z: deg };
 
 state.bangle = null;
 state.arm = { on: 0, v: 20 };
@@ -1837,9 +1920,8 @@ function pushBangleCfg() {
 }
 const pushArmCfg = debounce(pushBangleCfg, 300);
 
-function bangleCue(w, title, sub, buzzMs) {
-  const strength = Math.min(1, Math.max(0.1, state.intensity / 10));
-  bangleCall(w, `NP.cue(${jsStr(title)},${jsStr(sub)},${buzzMs},${strength})`);
+function bangleCue(w, items, sub, buzzMs) {
+  bangleCall(w, `NP.cue(${jsStr(items)},${jsStr(sub)},${buzzMs})`);
 }
 
 // Ausgenommen wie beim Clip: der Clip hat für genau diesen Schritt
@@ -1853,7 +1935,12 @@ async function bangleOnStep(clip, step, strideMs) {
   const w = bangleUsable();
   if (!w || Date.now() - step.t1 > STEP_LATE_MS) return;
 
-  const reasons = step.flags & F.VIBRATE ? CUE_TEXT.filter(c => step.flags & c.bit).map(c => c.text) : [];
+  // Zielwert aus der Einstellung, die gerade in der App steht: dieselbe, die
+  // der Clip hat — hydrate() und pushSettings() halten beide gleich.
+  const reasons = step.flags & F.VIBRATE
+    ? CUE_TEXT.filter(c => step.flags & c.bit)
+        .map(c => ({ t: c.t, v: c.v(step), z: c.z(state.fb[c.key].v), sub: c.sub }))
+    : [];
   let armCue = false;
   if (w.cal && strideMs >= STRIDE_MIN_MS && strideMs <= STRIDE_MAX_MS) {
     const r = await bangleAsk(w, guard(`NP.s(${Math.round(strideMs)})`), 's', 1500);
@@ -1870,10 +1957,12 @@ async function bangleOnStep(clip, step, strideMs) {
       renderArmRead();
     }
   }
-  if (armCue) reasons.push(ARM_TEXT);
+  if (armCue) reasons.push({ t: ARM_TEXT.t, v: ARM_TEXT.v(step), z: ARM_TEXT.z(state.arm.v), sub: ARM_TEXT.sub });
   if (!reasons.length || state.bangle !== w) return;
-  if (reasons.length === 1) bangleCue(w, reasons[0][0], reasons[0][1], armCue ? ARM_BUZZ_MS : 0);
-  else bangleCue(w, reasons.map(r => r[0]), '', armCue ? ARM_BUZZ_MS : 0);
+  // Der Hinweis nur bei einem Grund: bei mehreren braucht der Schirm den
+  // Platz für die Werte.
+  const sub = reasons.length === 1 ? reasons[0].sub : '';
+  bangleCue(w, reasons.map(({ t, v, z }) => ({ t, v, z })), sub, armCue ? ARM_BUZZ_MS : 0);
 }
 
 function renderArm() {
