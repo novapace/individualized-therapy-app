@@ -513,8 +513,19 @@ function completeStep(clip, seq) {
   }
   for (const p of pts) if (p.flex == null) p.flex = liveFlexAt(clip, s.start + SAMPLE_MS * p.i);
 
+  // Flat steps end at the height they started. On level ground a foot does,
+  // but the integration leaves a small net height per step — mostly upward,
+  // +0.2…+0.8 cm on flat walks (sole_hardware_clip_P4 STEP_LENGTH_NOTES.md) —
+  // and stacked step after step it lifts the whole track. Every step the
+  // clip did not flag as a stair step (|height| under its ±12 cm threshold)
+  // therefore has its net height removed, spread linearly over its samples
+  // like the clip's own drift correction. Positions only: step.h keeps the
+  // measured value for the statistics and the CSV's step_height_m.
+  const dz = s.flags & F.STAIRS ? s.dz : 0;
+  if (!(s.flags & F.STAIRS)) for (const p of pts) p.z -= s.dz * p.i / (n - 1);
+
   const base = clip.pos.slice();
-  clip.pos = [base[0] + s.dx, base[1] + s.dy, base[2] + s.dz];
+  clip.pos = [base[0] + s.dx, base[1] + s.dy, base[2] + dz];
   const len = Math.hypot(s.dx, s.dy);
   // Under STEPLEN_ARTIFACT_MAX_M (5 cm) the clip itself does not count it as
   // a step (threshold_feedback.cpp). Its movement still goes into the
