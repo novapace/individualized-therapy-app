@@ -38,7 +38,11 @@
                  object-fit: contain; object-position: left center; }
   header h1 { font-size: 20px; margin: 0; font-weight: 600; flex: 1; color: var(--accent); }
   #status { font-size: 15px; color: var(--dim); text-align: right; min-width: 0; }
-  #connectBtn { white-space: nowrap; flex: none; }
+  /* Drei Knöpfe untereinander: Clip, Uhr, Uhr kalibrieren. Die beiden
+     Uhr-Knöpfe kompakter — sie sind Zubehör, der Clip ist die Hauptsache. */
+  .hbtns { display: flex; flex-direction: column; gap: 6px; flex: none; align-items: stretch; }
+  .hbtns button { white-space: nowrap; }
+  .hbtns button.secondary { padding: 8px 12px; font-size: 15px; }
   /* Phone width: the logo and the button keep their size, the status line
      shrinks — "verbunden: L + R" fits on one line at 14 px. */
   @media (max-width: 480px) {
@@ -46,6 +50,7 @@
     header #logo { height: 22px; }
     #status { font-size: 14px; }
     #connectBtn { padding: 10px 12px; font-size: 16px; }
+    .hbtns button.secondary { padding: 6px 10px; font-size: 14px; }
   }
   #status.ok { color: var(--accent); }
   #status.bad { color: var(--stop); }
@@ -160,7 +165,13 @@
   <img id="logo" src="novapace_logo_horizontal_green_F1uoio.png" alt="novapace">
   <h1 id="wordmark" hidden>novapace</h1>
   <span id="status">getrennt</span>
-  <button id="connectBtn">Clip verbinden</button>
+  <div class="hbtns">
+    <button id="connectBtn">Clip verbinden</button>
+    <button id="watchBtn" class="secondary">Uhr verbinden</button>
+    <!-- Nur mit verbundener Uhr sichtbar: ohne Uhr gibt es nichts zu
+         kalibrieren, und die Kopfzeile bleibt eine Zeile kürzer. -->
+    <button id="armCalBtn" class="secondary" hidden>Uhr kalibrieren</button>
+  </div>
 </header>
 
 <main>
@@ -182,6 +193,14 @@
       gespeichert und die Aufnahme unten angezeigt.
     </div>
     <div class="tiles" id="tiles"></div>
+    <!-- Nullstellung: der Clip nimmt den Fußwinkel dieses Moments als 0°,
+         gemittelt über eine halbe Sekunde Stand (Kommando "Z", ble.h). Im
+         Clip, nicht hier: die Schwelle „Mindest-Flexwinkel“ vergleicht er mit
+         seinem eigenen Nullpunkt. -->
+    <div class="row" id="zeroRow" hidden>
+      <button class="secondary" id="zeroBtn">Nullstellung setzen</button>
+      <span class="hint" id="zeroInfo" style="flex:1 1 220px">Füße flach hinstellen, still halten, dann tippen.</span>
+    </div>
   </section>
 
   <!-- ================================================================ -->
@@ -226,12 +245,8 @@
   <section class="card" id="fbCard">
     <h2>Feedback anpassen</h2>
     <div class="hint">
-      Ein Schritt, der unter einer eingeschalteten Schwelle bleibt, löst am Clip
-      dieses Fußes eine Vibration aus. Ausgenommen sind Treppenschritte (und die drei
-      danach) sowie Kurvenschritte selbst — dieselbe Erkennung wie im
-      Patienten-Clip. Die Schwellen werden im Clip gespeichert und gelten auch ohne Telefon.
-      Mit verbundener Uhr zeigt sie bei jeder Vibration den Grund; die Armschwung-Schwelle
-      darunter wirkt nur, solange die Uhr mit diesem Telefon verbunden ist.
+      Grenzwerte für Vibrationsrückmeldung wählen. In Treppen und Kurven wird nicht
+      vibriert. Die Grenzwerte gelten auch ohne Nutzung vom Telefon.
     </div>
     <div id="thresholds"></div>
     <!-- Vierte Schwelle, aber nicht im Clip: der Clip sieht den Arm nicht.
@@ -253,10 +268,9 @@
       </div>
       <div class="stat" id="armStat"></div>
       <div class="hint" id="armRead">Keine Uhr verbunden.</div>
-      <div class="row"><button class="secondary" id="armCalBtn" disabled>Uhr kalibrieren</button></div>
     </div>
     <div class="hint" id="fbSummary"></div>
-    <div class="thr">
+    <div class="thr" id="intThr">
       <div class="top"><span class="name">Vibrationsstärke <b id="intVal">7</b></span>
         <button class="secondary" id="pulseBtn">Testimpuls</button></div>
       <div class="slider">
@@ -645,7 +659,11 @@ E.on("kill", function () {
 });
 g.clear();
 minuteTick();
-out({ t: "ready", h: VER, cal: !!cal });
+// Akkustand fuers Telefon: beim Start und dann jede Minute. E.getBattery()
+// ist auf der Bangle.js 2 aus der Spannung geschaetzt -- fuer "bald laden"
+// reicht das.
+out({ t: "ready", h: VER, cal: !!cal, bat: E.getBattery() });
+setInterval(function () { out({ t: "bat", b: E.getBattery() }); }, 60000);
 </script>
 
 <script>
@@ -1209,15 +1227,19 @@ function buildTracks() {
   const t0 = allT.length ? Math.min(...allT) : 0;
   let tMax = 0;
   const box = { x0: Infinity, x1: -Infinity, y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
+  // Gehrichtung ausrichten: each clip's x/y heading is arbitrary (the game
+  // rotation vector has no north), so the two feet start out rotated against
+  // each other. Each side is first rotated so its first ~2 m of walking point
+  // along +x. With both feet present, the right track is then fitted onto the
+  // left one (fitTrack(): rotation + shift that minimise the distance between
+  // the two curves), so the walks lie on top of each other instead of 20 cm
+  // apart with whatever residual angle the 2-m heading left.
+  const sorted = {}, xf = {};
   for (const side of ['L', 'R']) {
     const sd = dataset.sides[side];
     if (!sd || !sd.rows.length) continue;
-    const rows = sd.rows.slice().sort((a, b) => a.t - b.t);
+    const rows = sorted[side] = sd.rows.slice().sort((a, b) => a.t - b.t);
     const p0 = rows[0];
-    // Gehrichtung ausrichten: each clip's x/y heading is arbitrary (the
-    // game rotation vector has no north), so the two feet start out rotated
-    // against each other. Rotate each so its first ~2 m of walking points
-    // along +x, and set the feet 20 cm apart.
     let ang = 0;
     if (align) {
       let far = rows[rows.length - 1];
@@ -1225,12 +1247,28 @@ function buildTracks() {
       ang = Math.atan2(far.y - p0.y, far.x - p0.x);
     }
     const ca = Math.cos(-ang), sa = Math.sin(-ang);
-    const lat = align ? (side === 'L' ? 0.1 : -0.1) : 0;
+    xf[side] = align
+      ? (r => { const dx = r.x - p0.x, dy = r.y - p0.y; return [dx * ca - dy * sa, dx * sa + dy * ca]; })
+      : (r => [r.x, r.y]);
+  }
+  // Fallback, one foot only or a fit that failed: the old 20-cm spacing, so
+  // two tracks never land exactly on each other by accident.
+  const lat = { L: 0, R: 0 };
+  if (align && sorted.L && sorted.R) {
+    const fit = fitTrack(sorted.L.map(xf.L), sorted.R.map(xf.R));
+    if (fit) {
+      const base = xf.R, c = Math.cos(fit.th), s = Math.sin(fit.th);
+      xf.R = r => { const [x, y] = base(r); return [c * x - s * y + fit.tx, s * x + c * y + fit.ty]; };
+    } else { lat.L = 0.1; lat.R = -0.1; }
+  }
+  for (const side of ['L', 'R']) {
+    const rows = sorted[side];
+    if (!rows) continue;
+    const p0 = rows[0];
     const tr = { t: [], x: [], y: [], z: [], flex: [], step: [] };
     for (const r of rows) {
-      const dx = r.x - p0.x, dy = r.y - p0.y;
-      const x = align ? dx * ca - dy * sa : r.x;
-      const y = (align ? dx * sa + dy * ca : r.y) + lat;
+      const [x, y0] = xf[side](r);
+      const y = y0 + lat[side];
       const z = (r.z - p0.z) * zs;
       tr.t.push((r.t - t0) / 1000); tr.x.push(x); tr.y.push(y); tr.z.push(z);
       tr.flex.push(r.flex); tr.step.push(r.step);
@@ -1246,6 +1284,45 @@ function buildTracks() {
   view.bounds = Object.keys(view.tracks).length ? box : null;
   view.t = Math.min(view.t, tMax);
   $('viewEmpty').hidden = !!view.bounds;
+}
+
+// Rigid 2-D fit of `mov` onto `ref` (arrays of [x, y]): ICP — pair every
+// moving point with its nearest reference point, solve rotation + shift for
+// those pairs in closed form (Kabsch), repeat. Starts from the identity,
+// which the per-side heading alignment above already makes a close guess.
+// Subsampled to ≤ 300 points a side: a walk of a few minutes is tens of
+// thousands of rows, and the nearest-point search is quadratic.
+// Returns { th, tx, ty } (mov -> ref), or null with too little to fit.
+function fitTrack(ref, mov) {
+  const thin = (a, n) => a.filter((_, i) => i % Math.max(1, Math.ceil(a.length / n)) === 0);
+  const R = thin(ref, 300), M = thin(mov, 300);
+  if (R.length < 10 || M.length < 10) return null;
+  let th = 0, tx = 0, ty = 0;
+  for (let it = 0; it < 20; it++) {
+    const c = Math.cos(th), s = Math.sin(th);
+    let mx = 0, my = 0, qx = 0, qy = 0;
+    const pairs = M.map(([x, y]) => {
+      const px = c * x - s * y + tx, py = s * x + c * y + ty;
+      let best = R[0], bd = Infinity;
+      for (const q of R) { const d = (q[0] - px) ** 2 + (q[1] - py) ** 2; if (d < bd) { bd = d; best = q; } }
+      mx += x; my += y; qx += best[0]; qy += best[1];
+      return [x, y, best[0], best[1]];
+    });
+    mx /= pairs.length; my /= pairs.length; qx /= pairs.length; qy /= pairs.length;
+    let sxx = 0, sxy = 0;
+    for (const [x, y, a, b] of pairs) {
+      const ux = x - mx, uy = y - my, vx = a - qx, vy = b - qy;
+      sxx += ux * vx + uy * vy;
+      sxy += ux * vy - uy * vx;
+    }
+    const nth = Math.atan2(sxy, sxx);
+    const nc = Math.cos(nth), ns = Math.sin(nth);
+    const ntx = qx - (nc * mx - ns * my), nty = qy - (ns * mx + nc * my);
+    const done = Math.abs(nth - th) < 1e-4 && Math.hypot(ntx - tx, nty - ty) < 1e-4;
+    th = nth; tx = ntx; ty = nty;
+    if (done) break;
+  }
+  return { th, tx, ty };
 }
 
 function resetCamera() {
@@ -1653,7 +1730,7 @@ function renderFeed() {
   if (!state.feed.length) { ul.innerHTML = '<li><span class="hint">Noch keine Schritte.</span></li>'; return; }
   ul.innerHTML = state.feed.map(s => {
     const [cls, txt] = stepOutcome(s);
-    return `<li><b>${s.side}</b>`
+    return `<li><b>${s.side}${pad(s.no, 3)}</b>`
       + `<span>${num(s.len, 2)} m</span><span>Auftrittswinkel ${num(s.maxflex, 0)}°</span><span>Winkelumfang ${num(s.range, 0)}°</span>`
       + (s.arm != null ? `<span>Arm ${num(s.arm, 0)}°</span>` : '')
       + `<span class="what ${cls}">${txt}</span></li>`;
@@ -1805,6 +1882,7 @@ function onBangleMsg(w, msg) {
   if (msg.t === 'ready') {
     w.ready = msg.h === BANGLE_HASH;
     w.cal = !!msg.cal;
+    if (msg.bat != null) w.batt = msg.bat;
     w.launching = false;
     pushBangleCfg();
     renderWatch();
@@ -1812,6 +1890,8 @@ function onBangleMsg(w, msg) {
     w.ready = false;
     renderWatch();
     launchBangleApp(w).catch(e => { w.error = e.message; renderWatch(); });
+  } else if (msg.t === 'bat') {
+    if (msg.b !== w.batt) { w.batt = msg.b; renderWatch(); }
   } else if (msg.t === 'cal') {
     w.calibrating = false;
     if (msg.ok) w.cal = true;
@@ -1861,6 +1941,7 @@ async function ensureBangleApp(w) {
     const st = await bangleAsk(w, '\x10NP.hi()\n', 'hi', 3000);
     w.ready = true;
     w.cal = !!st?.cal;
+    if (st?.bat != null) w.batt = st.bat;
     pushBangleCfg();
     renderWatch();
     return;
@@ -1881,7 +1962,7 @@ async function connectBangle() {
     w = { device, buf: '', chain: Promise.resolve(), waiters: [],
           rx: await service.getCharacteristic(NUS_RX),
           ready: false, cal: false, launching: false, calibrating: false,
-          progress: null, calResult: null, error: null, disturbed: false };
+          progress: null, calResult: null, error: null, disturbed: false, batt: null };
     const tx = await service.getCharacteristic(NUS_TX);
     await tx.startNotifications();
     tx.addEventListener('characteristicvaluechanged', ev => onBangleData(w, ev));
@@ -2010,16 +2091,14 @@ function renderWatch() {
   const box = $('watchRow');
   const w = state.bangle;
   box.innerHTML = '';
-  if (!w) {
-    const b = document.createElement('button');
-    b.className = 'secondary';
-    b.textContent = 'Uhr verbinden';
-    b.onclick = connectBangle;
-    box.appendChild(b);
-  } else {
+  $('watchBtn').textContent = w ? 'Uhr trennen' : 'Uhr verbinden';
+  $('armCalBtn').hidden = !w;
+  if (w) {
     const el = document.createElement('span');
     el.className = 'chip';
-    el.innerHTML = '<span class="dot L"></span>Uhr';
+    // Dasselbe Akkusymbol wie bei den Clips; die Uhr meldet ihren Stand
+    // beim Start und dann jede Minute ("bat").
+    el.innerHTML = '<span class="dot L"></span>Uhr' + batteryIcon({ batt: w.batt });
     const x = document.createElement('button');
     x.textContent = '✕';
     x.setAttribute('aria-label', 'Uhr trennen');
@@ -2029,7 +2108,8 @@ function renderWatch() {
     const hint = w.error ? `Uhr: ${w.error}. Trennen und neu verbinden.`
       : w.progress != null ? `Uhr-App wird installiert… ${w.progress} %`
       : !w.ready ? 'Uhr-App wird gestartet…'
-      : !w.cal ? 'Uhr nicht kalibriert — „Uhr kalibrieren“ unter „Feedback anpassen“.' : '';
+      : !w.cal ? 'Uhr nicht kalibriert — oben „Uhr kalibrieren“ tippen.'
+      : w.batt != null && w.batt < 15 ? 'Akku der Uhr fast leer — bitte laden.' : '';
     if (hint) {
       const h = document.createElement('span');
       h.className = 'hint';
@@ -2107,15 +2187,35 @@ function renderClips() {
   $('lockBanner').textContent = `Treppe erkannt (${locked.join(' + ')}) — jede Vibration gesperrt.`;
 }
 
+// "Z" an alle Clips, dann nachsehen, ob der Live-Winkel auf ~0 gefallen ist.
+// Die Antwort ist der Winkel selbst: eine ältere Firmware kennt "Z" nicht und
+// quittiert es stumm, und genau das soll hier nicht als Erfolg durchgehen.
+// 1,5 s: die Firmware mittelt eine halbe Sekunde Stand, der Status-Frame kommt
+// alle 60 ms — genug Luft, auch wenn der Fuß kurz zuckt.
+const ZERO_CHECK_MS = 1500;
+const ZERO_OK_DEG = 1.5;
+async function zeroClips() {
+  if (!state.clips.length) return;
+  const info = $('zeroInfo');
+  $('zeroBtn').disabled = true;
+  info.textContent = 'Nullstellung … Füße still halten.';
+  await broadcast('Z');
+  setTimeout(() => {
+    $('zeroBtn').disabled = false;
+    const bad = state.clips.filter(c => c.liveFlex == null || Math.abs(c.liveFlex) > ZERO_OK_DEG);
+    info.textContent = !bad.length
+      ? 'Nullstellung gesetzt.'
+      : `Nicht übernommen (${bad.map(c => sideName(c.side)).join(', ')}): Fuß bewegt, `
+        + 'oder die Clip-Firmware ist älter und muss neu geflasht werden.';
+  }, ZERO_CHECK_MS);
+}
+
 function renderTiles() {
   const box = $('tiles');
-  box.innerHTML = [...state.clips].sort((a, b) => a.side.localeCompare(b.side)).map(c => {
-    const s = c.lastStep;
-    return `<div class="tile"><div class="lbl">${sideName(c.side)} · Flexwinkel</div>`
-      + `<div class="val">${c.liveFlex == null ? '–' : num(c.liveFlex, 1) + '°'}</div>`
-      + `<div class="sub">Schrittlänge ${s ? num(s.len, 2) + ' m' : '–'} · Höhe ${s ? num(s.h, 2) + ' m' : '–'}</div>`
-      + `<div class="sub">Auftrittswinkel ${s ? num(s.maxflex, 0) + '°' : '–'} · Winkelumfang ${s ? num(s.range, 0) + '°' : '–'}</div></div>`;
-  }).join('');
+  box.innerHTML = [...state.clips].sort((a, b) => a.side.localeCompare(b.side)).map(c =>
+    `<div class="tile"><div class="lbl">${sideName(c.side)} · Flexwinkel</div>`
+    + `<div class="val">${c.liveFlex == null ? '–' : num(c.liveFlex, 1) + '°'}</div></div>`).join('');
+  $('zeroRow').hidden = !state.clips.length;
 }
 let tilesPending = false;
 function renderTilesThrottled() {
@@ -2136,6 +2236,8 @@ function renderAll() {
 //  Wiring
 // =====================================================================
 $('connectBtn').addEventListener('click', connect);
+$('watchBtn').addEventListener('click', () => { if (state.bangle) disconnectBangle(); else connectBangle(); });
+$('zeroBtn').addEventListener('click', zeroClips);
 $('recBtn').addEventListener('click', () => { if (rec.on) recStop(); else recStart(); });
 $('refreshBtn').addEventListener('click', () => loadDataset(datasetFromRecording()));
 $('csvInput').addEventListener('change', e => { loadCsvFiles([...e.target.files]); e.target.value = ''; });
@@ -2155,7 +2257,10 @@ $('intensity').addEventListener('input', e => {
 });
 $('pulseBtn').addEventListener('click', () => broadcast('P'));
 wireArm();
-wireNudges(document.querySelector('#fbCard > .thr'));
+// Per id, nicht per '#fbCard > .thr': seit der Armschwung-Block davor steht,
+// traf der Selektor ihn statt dieses Blocks — die Tasten der Stärke blieben
+// tot, und die des Armschwungs zählten doppelt.
+wireNudges($('intThr'));
 window.addEventListener('resize', () => draw());
 
 const logoEl = $('logo');
