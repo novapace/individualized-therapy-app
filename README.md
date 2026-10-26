@@ -1,5 +1,7 @@
 # novapace — Individuelle Therapie (Web-App)
 
+DISCLAIMER: DIESER FUNKTIONSUMFANG IST REIN FÜR PRÄSENTATIONSZWECKE UND SOLLTE NICHT FÜR PATIENTEN GENUTZT WERDEN
+
 Web-App für den novapace Clip mit der Firmware „individualized therapy“:
 Gangdaten aufnehmen, in 3D ansehen und daraus individuelle
 Vibrationsschwellen setzen. Läuft im Browser über Web Bluetooth (Chrome).
